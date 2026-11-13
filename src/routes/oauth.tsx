@@ -33,7 +33,7 @@ function appendQuery(baseUri: string, params: Record<string, string>): string {
 }
 
 function renderOAuthError(title: string, detail: string) {
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><link rel="stylesheet" href="/styles.css"></head><body><main class="container main-content"><div class="auth-card"><h1>${title}</h1><p class="alert alert-error">${detail}</p><a class="btn btn-ghost" href="/">Back to JoeAuth</a></div></main></body></html>`;
+  return `<!doctype html><html lang="en" data-bs-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${title}</title><script src="/theme.js"></script><link rel="stylesheet" href="/vendor/bootstrap.min.css"><link rel="stylesheet" href="/vendor/bootstrap-icons.min.css"><link rel="stylesheet" href="/styles.css"></head><body class="centered-body"><main class="minimal-main"><div class="card shadow-sm auth-card"><div class="card-body p-4"><h1 class="h4 fw-semibold mb-3"><i class="bi bi-exclamation-triangle-fill text-danger me-2"></i>${title}</h1><div class="alert alert-danger">${detail}</div><a class="btn btn-outline-secondary" href="/"><i class="bi bi-arrow-left me-1"></i>Back to JoeAuth</a></div></div></main></body></html>`;
 }
 
 // --- OIDC Discovery & JWKS ---

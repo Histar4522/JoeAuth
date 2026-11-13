@@ -1,5 +1,15 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const BOOTSTRAP_CSS = fs.readFileSync(path.join(__dirname, '..', 'public', 'vendor', 'bootstrap.min.css'), 'utf8');
+const BOOTSTRAP_ICONS_CSS = fs.readFileSync(path.join(__dirname, '..', 'public', 'vendor', 'bootstrap-icons.min.css'), 'utf8');
+const BOOTSTRAP_ICONS_WOFF2 = fs.readFileSync(path.join(__dirname, '..', 'public', 'vendor', 'fonts', 'bootstrap-icons.woff2'));
+const BOOTSTRAP_ICONS_WOFF = fs.readFileSync(path.join(__dirname, '..', 'public', 'vendor', 'fonts', 'bootstrap-icons.woff'));
+const THEME_JS = fs.readFileSync(path.join(__dirname, '..', 'public', 'theme.js'), 'utf8');
 
 const portArg = process.argv.find((a) => a.startsWith('--port='));
 const PORT = Number(process.env.PORT || (portArg ? portArg.split('=')[1] : 8788));
@@ -55,167 +65,158 @@ function sendJson(res, status, payload) {
 
 function renderHtml() {
   return `<!doctype html>
-<html lang="en">
+<html lang="en" data-bs-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>JoeAuth OAuth Test Server</title>
+  <script src="/theme.js"></script>
+  <link rel="stylesheet" href="/bootstrap.min.css">
+  <link rel="stylesheet" href="/bootstrap-icons.min.css">
   <style>
-    :root {
-      --bg: #f8fafc; --surface: #ffffff; --border: #e2e8f0;
-      --text: #0f172a; --muted: #64748b; --primary: #2563eb;
-      --primary-hover: #1d4ed8; --ok: #16a34a; --bad: #dc2626;
+    pre.resp-pre {
+      margin: 0.75rem 0 0;
+      background: var(--bs-tertiary-bg);
+      color: var(--bs-body-color);
+      border: 1px solid var(--bs-border-color);
+      border-radius: var(--bs-border-radius);
+      padding: 0.9rem;
+      font-size: 0.82rem;
+      line-height: 1.45;
+      max-height: 460px;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
     }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0; padding: 24px 16px; background: var(--bg); color: var(--text);
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; line-height: 1.5;
-    }
-    .wrap { max-width: 920px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
-    .card {
-      background: var(--surface); border: 1px solid var(--border);
-      border-radius: 10px; padding: 18px 20px;
-    }
-    h1 { margin: 0 0 4px; font-size: 1.35rem; }
-    h2 { margin: 0 0 12px; font-size: 1.05rem; }
-    .muted { color: var(--muted); font-size: 0.88rem; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; }
-    label { display: flex; flex-direction: column; gap: 5px; font-size: 0.88rem; font-weight: 600; margin-bottom: 10px; }
-    input, textarea, select {
-      width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px;
-      font: inherit; font-size: 0.9rem; background: #fff; color: var(--text);
-    }
-    textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.82rem; resize: vertical; }
-    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-    button {
-      border: 1px solid var(--border); border-radius: 7px; padding: 8px 12px;
-      background: #fff; color: var(--text); font: inherit; font-size: 0.88rem; font-weight: 600;
-      cursor: pointer;
-    }
-    button:hover { background: #f1f5f9; }
-    button.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
-    button.primary:hover { background: var(--primary-hover); }
-    .badge {
-      display: inline-block; padding: 2px 8px; border-radius: 999px;
-      font-size: 0.78rem; font-weight: 700; background: #e2e8f0; color: #334155;
-    }
-    .badge.ok { background: #dcfce7; color: #166534; }
-    .badge.bad { background: #fee2e2; color: #991b1b; }
-    pre {
-      margin: 10px 0 0; background: #0f172a; color: #e2e8f0; padding: 14px;
-      border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.45;
-      max-height: 460px; white-space: pre-wrap; word-break: break-word;
-    }
-    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.86em; }
-    .hidden { display: none; }
+    .hidden { display: none !important; }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="card">
-      <h1>JoeAuth OAuth &amp; API Test Server</h1>
-      <div class="muted">
-        Running at <code>${SELF_ORIGIN}</code> · Callback URI: <code id="callback-uri">${CALLBACK_URI}</code>
-        <button type="button" id="copy-callback-btn" style="padding:2px 8px;margin-left:6px;font-size:0.78rem;">Copy Callback URI</button>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>1. Target Server &amp; Token</h2>
-      <div class="grid">
-        <label>
-          Server Base URL
-          <input id="base-url" type="url" value="http://127.0.0.1:8787" placeholder="http://127.0.0.1:8787">
-        </label>
-        <label>
-          Scope (for OAuth Authorize / M2M)
-          <input id="scope" type="text" value="openid profile email offline_access">
-        </label>
-      </div>
-
-      <label>
-        Access / Bearer / JWT Token
-        <textarea id="token" rows="3" placeholder="Paste an access_token or id_token here (or sign in below to fill automatically)"></textarea>
-      </label>
-
-      <div id="received-tokens" class="row hidden" style="margin-bottom:10px;">
-        <span class="muted">Received tokens:</span>
-        <button type="button" id="use-access-token" class="hidden">Use access_token</button>
-        <button type="button" id="use-id-token" class="hidden">Use id_token</button>
-      </div>
-
-      <div class="grid">
-        <label>
-          Client ID (optional for bearer tests; required for OAuth / Introspect)
-          <input id="client-id" type="text" placeholder="ja_...">
-        </label>
-        <label>
-          Client Secret (optional for PKCE; required for Introspect / M2M)
-          <input id="client-secret" type="password" placeholder="jas_...">
-        </label>
-      </div>
-
-      <label>
-        Refresh Token (optional)
-        <input id="refresh-token" type="text" placeholder="jar_...">
-      </label>
-
-      <div class="row">
-        <button type="button" class="primary" id="btn-authorize">Authorize / Sign in with JoeAuth (PKCE S256)</button>
-        <button type="button" id="btn-m2m">Client Credentials (M2M)</button>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>2. Test API Endpoints</h2>
-      <div class="row" style="margin-bottom:14px;">
-        <button type="button" class="primary" id="btn-userinfo">GET UserInfo</button>
-        <button type="button" id="btn-verify-jwt">Verify Ed25519 JWT</button>
-        <button type="button" id="btn-introspect">POST Introspect</button>
-        <button type="button" id="btn-refresh">POST Refresh Token</button>
-        <button type="button" id="btn-revoke">POST Revoke Token</button>
-        <button type="button" id="btn-discovery">GET OIDC Discovery</button>
-        <button type="button" id="btn-jwks">GET JWKS</button>
-      </div>
-
-      <div class="grid">
-        <label>
-          Custom Method
-          <select id="custom-method">
-            <option>GET</option>
-            <option>POST</option>
-            <option>PUT</option>
-            <option>PATCH</option>
-            <option>DELETE</option>
+  <div class="container py-4" style="max-width: 960px;">
+    <div class="card shadow-sm mb-3">
+      <div class="card-body d-flex justify-content-between align-items-start flex-wrap gap-3">
+        <div>
+          <h1 class="h4 fw-semibold mb-1"><i class="bi bi-shield-check me-2 text-primary"></i>JoeAuth OAuth &amp; API Test Server</h1>
+          <div class="text-body-secondary small">
+            Running at <code>${SELF_ORIGIN}</code> · Callback URI: <code id="callback-uri">${CALLBACK_URI}</code>
+            <button type="button" id="copy-callback-btn" class="btn btn-sm btn-outline-secondary py-0 px-2 ms-1"><i class="bi bi-clipboard me-1"></i>Copy</button>
+          </div>
+        </div>
+        <div class="input-group input-group-sm w-auto">
+          <span class="input-group-text"><i class="bi bi-circle-half"></i></span>
+          <select class="form-select form-select-sm w-auto" data-theme-select aria-label="Theme">
+            <option value="auto" selected>Auto</option>
+            <option value="dark">Dark</option>
+            <option value="light">Light</option>
           </select>
-        </label>
-        <label>
-          Custom Path (relative to Base URL)
-          <input id="custom-path" type="text" value="/api/health" placeholder="/api/oauth/userinfo">
-        </label>
-      </div>
-      <label>
-        Custom JSON Body (optional, for POST/PUT/PATCH)
-        <textarea id="custom-body" rows="2" placeholder='{"key":"value"}'></textarea>
-      </label>
-      <div class="row">
-        <label style="flex-direction:row;align-items:center;gap:6px;margin:0;font-weight:500;">
-          <input id="custom-use-bearer" type="checkbox" checked style="width:auto;">
-          Send <code>Authorization: Bearer &lt;Token&gt;</code>
-        </label>
-        <button type="button" id="btn-custom">Send Custom Request</button>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="row" style="justify-content:space-between;">
-        <h2 style="margin:0;">3. Response</h2>
-        <div class="row">
-          <span id="resp-meta" class="muted">No request run yet.</span>
-          <span id="resp-status" class="badge hidden"></span>
         </div>
       </div>
-      <pre id="resp-out">Click any test button above to inspect the response.</pre>
+    </div>
+
+    <div class="card shadow-sm mb-3">
+      <div class="card-body">
+        <h2 class="h5 fw-semibold mb-3"><i class="bi bi-sliders me-2 text-primary"></i>1. Target Server &amp; Token</h2>
+        <div class="row g-3 mb-3">
+          <div class="col-md-6">
+            <label class="form-label" for="base-url">Server Base URL</label>
+            <input id="base-url" class="form-control" type="url" value="http://127.0.0.1:8787" placeholder="http://127.0.0.1:8787">
+          </div>
+          <div class="col-md-6">
+            <label class="form-label" for="scope">Scope (for OAuth Authorize / M2M)</label>
+            <input id="scope" class="form-control" type="text" value="openid profile email offline_access">
+          </div>
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label" for="token">Access / Bearer / JWT Token</label>
+          <textarea id="token" class="form-control font-monospace small" rows="3" placeholder="Paste an access_token or id_token here (or sign in below to fill automatically)"></textarea>
+        </div>
+
+        <div id="received-tokens" class="d-flex flex-wrap align-items-center gap-2 mb-3 hidden">
+          <span class="text-body-secondary small">Received tokens:</span>
+          <button type="button" id="use-access-token" class="btn btn-sm btn-outline-secondary hidden">Use access_token</button>
+          <button type="button" id="use-id-token" class="btn btn-sm btn-outline-secondary hidden">Use id_token</button>
+        </div>
+
+        <div class="row g-3 mb-3">
+          <div class="col-md-6">
+            <label class="form-label" for="client-id">Client ID (optional for bearer; required for OAuth / Introspect)</label>
+            <input id="client-id" class="form-control font-monospace" type="text" placeholder="ja_...">
+          </div>
+          <div class="col-md-6">
+            <label class="form-label" for="client-secret">Client Secret (optional for PKCE; required for Introspect / M2M)</label>
+            <input id="client-secret" class="form-control font-monospace" type="password" placeholder="jas_...">
+          </div>
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label" for="refresh-token">Refresh Token (optional)</label>
+          <input id="refresh-token" class="form-control font-monospace" type="text" placeholder="jar_...">
+        </div>
+
+        <div class="d-flex flex-wrap gap-2">
+          <button type="button" class="btn btn-primary" id="btn-authorize"><i class="bi bi-box-arrow-in-right me-1"></i>Authorize / Sign in with JoeAuth (PKCE S256)</button>
+          <button type="button" class="btn btn-outline-secondary" id="btn-m2m"><i class="bi bi-key me-1"></i>Client Credentials (M2M)</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card shadow-sm mb-3">
+      <div class="card-body">
+        <h2 class="h5 fw-semibold mb-3"><i class="bi bi-terminal me-2 text-primary"></i>2. Test API Endpoints</h2>
+        <div class="d-flex flex-wrap gap-2 mb-3">
+          <button type="button" class="btn btn-primary" id="btn-userinfo"><i class="bi bi-person-vcard me-1"></i>GET UserInfo</button>
+          <button type="button" class="btn btn-outline-secondary" id="btn-verify-jwt"><i class="bi bi-patch-check me-1"></i>Verify Ed25519 JWT</button>
+          <button type="button" class="btn btn-outline-secondary" id="btn-introspect"><i class="bi bi-search me-1"></i>POST Introspect</button>
+          <button type="button" class="btn btn-outline-secondary" id="btn-refresh"><i class="bi bi-arrow-repeat me-1"></i>POST Refresh Token</button>
+          <button type="button" class="btn btn-outline-secondary" id="btn-revoke"><i class="bi bi-slash-circle me-1"></i>POST Revoke Token</button>
+          <button type="button" class="btn btn-outline-secondary" id="btn-discovery"><i class="bi bi-compass me-1"></i>GET OIDC Discovery</button>
+          <button type="button" class="btn btn-outline-secondary" id="btn-jwks"><i class="bi bi-braces me-1"></i>GET JWKS</button>
+        </div>
+
+        <div class="row g-3 mb-3">
+          <div class="col-md-4">
+            <label class="form-label" for="custom-method">Custom Method</label>
+            <select id="custom-method" class="form-select">
+              <option>GET</option>
+              <option>POST</option>
+              <option>PUT</option>
+              <option>PATCH</option>
+              <option>DELETE</option>
+            </select>
+          </div>
+          <div class="col-md-8">
+            <label class="form-label" for="custom-path">Custom Path (relative to Base URL)</label>
+            <input id="custom-path" class="form-control font-monospace" type="text" value="/api/health" placeholder="/api/oauth/userinfo">
+          </div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label" for="custom-body">Custom JSON Body (optional, for POST/PUT/PATCH)</label>
+          <textarea id="custom-body" class="form-control font-monospace small" rows="2" placeholder='{"key":"value"}'></textarea>
+        </div>
+        <div class="d-flex flex-wrap align-items-center gap-3">
+          <div class="form-check mb-0">
+            <input id="custom-use-bearer" class="form-check-input" type="checkbox" checked>
+            <label class="form-check-label small" for="custom-use-bearer">
+              Send <code>Authorization: Bearer &lt;Token&gt;</code>
+            </label>
+          </div>
+          <button type="button" class="btn btn-outline-primary" id="btn-custom"><i class="bi bi-send me-1"></i>Send Custom Request</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <h2 class="h5 fw-semibold mb-0"><i class="bi bi-code-square me-2 text-primary"></i>3. Response</h2>
+          <div class="d-flex align-items-center gap-2">
+            <span id="resp-meta" class="text-body-secondary small">No request run yet.</span>
+            <span id="resp-status" class="badge hidden"></span>
+          </div>
+        </div>
+        <pre id="resp-out" class="resp-pre">Click any test button above to inspect the response.</pre>
+      </div>
     </div>
   </div>
 
@@ -276,13 +277,13 @@ function renderHtml() {
         respMeta.textContent = meta;
         if (typeof status === 'number') {
           respStatus.textContent = String(status);
-          respStatus.className = 'badge ' + (status >= 200 && status < 300 ? 'ok' : 'bad');
+          respStatus.className = 'badge ' + (status >= 200 && status < 300 ? 'text-bg-success' : 'text-bg-danger');
         } else if (status === 'VALID') {
           respStatus.textContent = 'VALID';
-          respStatus.className = 'badge ok';
+          respStatus.className = 'badge text-bg-success';
         } else if (status === 'INVALID') {
           respStatus.textContent = 'INVALID';
-          respStatus.className = 'badge bad';
+          respStatus.className = 'badge text-bg-danger';
         } else {
           respStatus.className = 'badge hidden';
         }
@@ -610,6 +611,31 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && reqUrl.pathname === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       return res.end(renderHtml());
+    }
+
+    if (req.method === 'GET' && reqUrl.pathname === '/bootstrap.min.css') {
+      res.writeHead(200, { 'Content-Type': 'text/css; charset=utf-8' });
+      return res.end(BOOTSTRAP_CSS);
+    }
+
+    if (req.method === 'GET' && reqUrl.pathname === '/bootstrap-icons.min.css') {
+      res.writeHead(200, { 'Content-Type': 'text/css; charset=utf-8' });
+      return res.end(BOOTSTRAP_ICONS_CSS);
+    }
+
+    if (req.method === 'GET' && reqUrl.pathname === '/fonts/bootstrap-icons.woff2') {
+      res.writeHead(200, { 'Content-Type': 'font/woff2' });
+      return res.end(BOOTSTRAP_ICONS_WOFF2);
+    }
+
+    if (req.method === 'GET' && reqUrl.pathname === '/fonts/bootstrap-icons.woff') {
+      res.writeHead(200, { 'Content-Type': 'font/woff' });
+      return res.end(BOOTSTRAP_ICONS_WOFF);
+    }
+
+    if (req.method === 'GET' && reqUrl.pathname === '/theme.js') {
+      res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
+      return res.end(THEME_JS);
     }
 
     if (req.method === 'GET' && reqUrl.pathname === '/health') {

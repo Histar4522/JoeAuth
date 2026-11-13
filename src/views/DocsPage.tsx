@@ -80,60 +80,93 @@ claims = jwt.decode(
 
   return (
     <Layout title="Developer Docs" auth={auth} csrfToken={csrfToken} showNav>
-      <div class="page-header">
-        <div>
-          <h1>{appName} Developer Documentation</h1>
-          <p class="muted">
-            OAuth 2.0 + PKCE (<code>S256</code>) + OpenID Connect identity provider using <strong>Ed25519</strong> (<code>EdDSA</code>) JWTs.
-            Base issuer URL: <code>{issuer}</code>
-          </p>
-        </div>
+      <div class="mb-4">
+        <h1 class="h3 fw-semibold mb-1">
+          <i class="bi bi-book me-2 text-primary"></i>{appName} Developer Documentation
+        </h1>
+        <p class="text-body-secondary mb-0">
+          OAuth 2.0 + PKCE (<code>S256</code>) + OpenID Connect identity provider using <strong>Ed25519</strong> (<code>EdDSA</code>) JWTs.
+          Base issuer URL: <code>{issuer}</code>
+        </p>
       </div>
 
-      <section class="card">
-        <h2>1. Integration Workflow</h2>
-        <ol class="steps">
-          <li>Register an account at <a href="/register">/register</a> (subject to admin email regex rules).</li>
-          <li>Apply for developer access at <a href="/developer">/developer</a> and wait for Admin/Superuser approval.</li>
-          <li>Once approved, create an OAuth application in <a href="/developer">/developer</a> (activated immediately) to obtain a <code>client_id</code>, one-time <code>client_secret</code>, and register exact <code>redirect_uris</code>.</li>
-          <li>Redirect users to <code>/oauth/authorize</code> with PKCE (<code>S256</code>), exchange the returned <code>code</code> at <code>/api/oauth/token</code>, and verify tokens via <code>/.well-known/jwks.json</code> or <code>/api/oauth/introspect</code>.</li>
-        </ol>
-        <p class="muted small">
-          <strong>Supported Scopes:</strong> <code>openid</code> (user ID <code>sub</code> &amp; <code>id_token</code>),{' '}
-          <code>profile</code> (<code>name</code>, <code>role</code>, <code>developer_status</code>),{' '}
-          <code>email</code> (<code>email</code>, <code>email_verified</code>),{' '}
-          <code>offline_access</code> (issues rotating 30-day <code>refresh_token</code>).
-        </p>
-      </section>
-
-      <section class="card mt-1">
-        <h2>2. Interactive Authorize URL &amp; PKCE Builder</h2>
-        <p class="muted small">Generate a live <code>/oauth/authorize</code> link with a browser-generated <code>S256</code> PKCE challenge.</p>
-        <div id="docs-url-builder" data-issuer={issuer} class="grid-form">
-          <input type="text" id="doc-client-id" placeholder="client_id (e.g. ja_...)" />
-          <input type="url" id="doc-redirect-uri" placeholder="https://your-service.example/callback" />
-          <input type="text" id="doc-scope" value="openid profile email offline_access" />
-          <button type="button" id="doc-generate-btn" class="btn btn-primary">Generate PKCE URL</button>
-        </div>
-        <div id="doc-generated-out" class="hidden mt-1">
-          <p class="small"><strong>PKCE code_verifier</strong> (save for <code>/api/oauth/token</code>): <code id="doc-verifier"></code></p>
-          <pre class="code-block" id="doc-auth-url"></pre>
-          <a id="doc-launch-link" class="btn btn-sm btn-ghost" href="#" target="_blank" rel="noopener noreferrer">Open Authorize URL</a>
+      <section class="card shadow-sm mb-4">
+        <div class="card-body">
+          <h2 class="h5 fw-semibold mb-3">
+            <i class="bi bi-diagram-3 me-2 text-primary"></i>1. Integration Workflow
+          </h2>
+          <ol class="ps-3 mb-3">
+            <li class="mb-1">Register an account at <a href="/register">/register</a> (subject to admin email regex rules).</li>
+            <li class="mb-1">Apply for developer access at <a href="/developer">/developer</a> and wait for Admin/Superuser approval.</li>
+            <li class="mb-1">
+              Once approved, create an OAuth application in <a href="/developer">/developer</a> (activated immediately) to obtain a{' '}
+              <code>client_id</code>, one-time <code>client_secret</code>, and register exact <code>redirect_uris</code>.
+            </li>
+            <li>
+              Redirect users to <code>/oauth/authorize</code> with PKCE (<code>S256</code>), exchange the returned <code>code</code> at{' '}
+              <code>/api/oauth/token</code>, and verify tokens via <code>/.well-known/jwks.json</code> or <code>/api/oauth/introspect</code>.
+            </li>
+          </ol>
+          <p class="text-body-secondary small mb-0">
+            <strong>Supported Scopes:</strong> <code>openid</code> (user ID <code>sub</code> &amp; <code>id_token</code>),{' '}
+            <code>profile</code> (<code>name</code>, <code>role</code>, <code>developer_status</code>),{' '}
+            <code>email</code> (<code>email</code>, <code>email_verified</code>),{' '}
+            <code>offline_access</code> (issues rotating 30-day <code>refresh_token</code>).
+          </p>
         </div>
       </section>
 
-      <section class="card mt-1">
-        <h2>3. Interface Reference</h2>
+      <section class="card shadow-sm mb-4">
+        <div class="card-body">
+          <h2 class="h5 fw-semibold mb-1">
+            <i class="bi bi-magic me-2 text-primary"></i>2. Interactive Authorize URL &amp; PKCE Builder
+          </h2>
+          <p class="text-body-secondary small mb-3">
+            Generate a live <code>/oauth/authorize</code> link with a browser-generated <code>S256</code> PKCE challenge.
+          </p>
+          <div id="docs-url-builder" data-issuer={issuer} class="row g-2 align-items-center">
+            <div class="col-md-3">
+              <input class="form-control" type="text" id="doc-client-id" placeholder="client_id (e.g. ja_...)" />
+            </div>
+            <div class="col-md-4">
+              <input class="form-control" type="url" id="doc-redirect-uri" placeholder="https://your-service.example/callback" />
+            </div>
+            <div class="col-md-3">
+              <input class="form-control" type="text" id="doc-scope" value="openid profile email offline_access" />
+            </div>
+            <div class="col-md-2 d-grid">
+              <button type="button" id="doc-generate-btn" class="btn btn-primary">
+                <i class="bi bi-link-45deg me-1"></i>Generate
+              </button>
+            </div>
+          </div>
+          <div id="doc-generated-out" class="hidden mt-3">
+            <p class="small mb-2">
+              <strong>PKCE code_verifier</strong> (save for <code>/api/oauth/token</code>): <code id="doc-verifier"></code>
+            </p>
+            <pre class="code-block mb-2" id="doc-auth-url"></pre>
+            <a id="doc-launch-link" class="btn btn-sm btn-outline-secondary" href="#" target="_blank" rel="noopener noreferrer">
+              <i class="bi bi-box-arrow-up-right me-1"></i>Open Authorize URL
+            </a>
+          </div>
+        </div>
+      </section>
 
-        <hr />
-        <h3><code>GET /.well-known/openid-configuration</code></h3>
-        <p class="small"><strong>Auth:</strong> Public · <strong>CORS:</strong> <code>*</code></p>
-        <p class="small muted">
-          <strong>Behavior:</strong> Returns the standard OpenID Connect Discovery metadata document describing endpoints,
-          supported grant types (<code>authorization_code</code>, <code>refresh_token</code>, <code>client_credentials</code>),
-          signing algorithm (<code>EdDSA</code>), scopes, and PKCE methods (<code>S256</code>).
-        </p>
-        <pre class="code-block">{`200 OK (application/json)
+      <section class="card shadow-sm mb-4">
+        <div class="card-body">
+          <h2 class="h5 fw-semibold mb-3">
+            <i class="bi bi-terminal me-2 text-primary"></i>3. Interface Reference
+          </h2>
+
+          <hr />
+          <h3 class="h6 fw-semibold"><code>GET /.well-known/openid-configuration</code></h3>
+          <p class="small mb-1"><strong>Auth:</strong> Public · <strong>CORS:</strong> <code>*</code></p>
+          <p class="small text-body-secondary">
+            <strong>Behavior:</strong> Returns the standard OpenID Connect Discovery metadata document describing endpoints,
+            supported grant types (<code>authorization_code</code>, <code>refresh_token</code>, <code>client_credentials</code>),
+            signing algorithm (<code>EdDSA</code>), scopes, and PKCE methods (<code>S256</code>).
+          </p>
+          <pre class="code-block mb-3">{`200 OK (application/json)
 {
   "issuer": "${issuer}",
   "authorization_endpoint": "${issuer}/oauth/authorize",
@@ -149,81 +182,81 @@ claims = jwt.decode(
   "code_challenge_methods_supported": ["S256"]
 }`}</pre>
 
-        <hr />
-        <h3><code>GET /.well-known/jwks.json</code></h3>
-        <p class="small"><strong>Auth:</strong> Public · <strong>Cache:</strong> <code>public, max-age=300</code> (edge KV-cached)</p>
-        <p class="small muted">
-          <strong>Behavior:</strong> Exposes the active Ed25519 public key(s) in JSON Web Key Set format so client services
-          can verify <code>access_token</code> and <code>id_token</code> signatures locally with zero network calls per request.
-        </p>
-        <pre class="code-block">{`200 OK (application/json)
+          <hr />
+          <h3 class="h6 fw-semibold"><code>GET /.well-known/jwks.json</code></h3>
+          <p class="small mb-1"><strong>Auth:</strong> Public · <strong>Cache:</strong> <code>public, max-age=300</code> (edge KV-cached)</p>
+          <p class="small text-body-secondary">
+            <strong>Behavior:</strong> Exposes the active Ed25519 public key(s) in JSON Web Key Set format so client services
+            can verify <code>access_token</code> and <code>id_token</code> signatures locally with zero network calls per request.
+          </p>
+          <pre class="code-block mb-3">{`200 OK (application/json)
 {
   "keys": [
     { "kty": "OKP", "crv": "Ed25519", "x": "<base64url>", "kid": "<key-id>", "alg": "EdDSA", "use": "sig" }
   ]
 }`}</pre>
 
-        <hr />
-        <h3><code>GET /oauth/authorize</code> &amp; <code>POST /oauth/authorize</code></h3>
-        <p class="small"><strong>Auth:</strong> User session cookie (redirects to <code>/login?return_to=...</code> if unauthenticated)</p>
-        <p class="small muted">
-          <strong>Behavior:</strong> Validates that <code>client_id</code> belongs to an <code>approved</code> app and that
-          <code>redirect_uri</code> matches one of the app's registered URIs <em>exactly</em>. Invalid <code>client_id</code> or
-          <code>redirect_uri</code> renders a <code>400</code> error page directly (never redirects to an unverified URI).
-          Requested scopes are filtered to the app's <code>allowed_scopes</code>. If the app is marked first-party or the user
-          already consented to those scopes, a single-use authorization code (<strong>60s TTL</strong>) is issued immediately;
-          otherwise the consent screen is shown.
-        </p>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr><th>Query Parameter</th><th>Required</th><th>Description</th></tr>
-            </thead>
-            <tbody>
-              <tr><td><code>client_id</code></td><td>Yes</td><td>Application ID (<code>ja_...</code>)</td></tr>
-              <tr><td><code>redirect_uri</code></td><td>Yes</td><td>Exact match of a registered redirect URI</td></tr>
-              <tr><td><code>response_type</code></td><td>No</td><td>Must be <code>code</code> (default <code>code</code>)</td></tr>
-              <tr><td><code>scope</code></td><td>No</td><td>Space-delimited scopes (default <code>openid profile email</code>)</td></tr>
-              <tr><td><code>state</code></td><td>Recommended</td><td>Opaque CSRF/state string echoed back on redirect</td></tr>
-              <tr><td><code>code_challenge</code></td><td>Recommended</td><td>Base64URL-encoded SHA-256 of <code>code_verifier</code></td></tr>
-              <tr><td><code>code_challenge_method</code></td><td>If PKCE</td><td>Must be <code>S256</code></td></tr>
-              <tr><td><code>nonce</code></td><td>No</td><td>OIDC replay-protection value embedded into <code>id_token</code></td></tr>
-            </tbody>
-          </table>
-        </div>
-        <pre class="code-block">{`// Return Values (302 Found to redirect_uri):
+          <hr />
+          <h3 class="h6 fw-semibold"><code>GET /oauth/authorize</code> &amp; <code>POST /oauth/authorize</code></h3>
+          <p class="small mb-1"><strong>Auth:</strong> User session cookie (redirects to <code>/login?return_to=...</code> if unauthenticated)</p>
+          <p class="small text-body-secondary">
+            <strong>Behavior:</strong> Validates that <code>client_id</code> belongs to an <code>approved</code> app and that
+            <code>redirect_uri</code> matches one of the app's registered URIs <em>exactly</em>. Invalid <code>client_id</code> or
+            <code>redirect_uri</code> renders a <code>400</code> error page directly (never redirects to an unverified URI).
+            Requested scopes are filtered to the app's <code>allowed_scopes</code>. If the app is marked first-party or the user
+            already consented to those scopes, a single-use authorization code (<strong>60s TTL</strong>) is issued immediately;
+            otherwise the account chooser / consent screen is shown.
+          </p>
+          <div class="table-responsive mb-3">
+            <table class="table table-sm align-middle mb-0">
+              <thead>
+                <tr><th>Query Parameter</th><th>Required</th><th>Description</th></tr>
+              </thead>
+              <tbody>
+                <tr><td><code>client_id</code></td><td>Yes</td><td>Application ID (<code>ja_...</code>)</td></tr>
+                <tr><td><code>redirect_uri</code></td><td>Yes</td><td>Exact match of a registered redirect URI</td></tr>
+                <tr><td><code>response_type</code></td><td>No</td><td>Must be <code>code</code> (default <code>code</code>)</td></tr>
+                <tr><td><code>scope</code></td><td>No</td><td>Space-delimited scopes (default <code>openid profile email</code>)</td></tr>
+                <tr><td><code>state</code></td><td>Recommended</td><td>Opaque CSRF/state string echoed back on redirect</td></tr>
+                <tr><td><code>code_challenge</code></td><td>Recommended</td><td>Base64URL-encoded SHA-256 of <code>code_verifier</code></td></tr>
+                <tr><td><code>code_challenge_method</code></td><td>If PKCE</td><td>Must be <code>S256</code></td></tr>
+                <tr><td><code>nonce</code></td><td>No</td><td>OIDC replay-protection value embedded into <code>id_token</code></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <pre class="code-block mb-3">{`// Return Values (302 Found to redirect_uri):
 // Approved: {redirect_uri}?code=jac_...&state={state}   (code expires in 60s, single-use)
 // Denied:   {redirect_uri}?error=access_denied&state={state}
 // Bad req:  {redirect_uri}?error=unsupported_response_type|invalid_request&state={state}`}</pre>
 
-        <hr />
-        <h3><code>POST /api/oauth/token</code></h3>
-        <p class="small">
-          <strong>Rate Limit:</strong> 60 req / 60s per IP · <strong>Content-Type:</strong>{' '}
-          <code>application/x-www-form-urlencoded</code> or <code>application/json</code> ·{' '}
-          <strong>Client Auth:</strong> HTTP Basic (<code>client_id:client_secret</code>) or body fields
-        </p>
-        <p class="small muted">
-          <strong>Behavior by <code>grant_type</code>:</strong>
-        </p>
-        <ul class="steps small">
-          <li>
-            <strong><code>authorization_code</code></strong>: Atomically consumes the single-use <code>code</code> (60s TTL),
-            verifies <code>redirect_uri</code> matches, verifies PKCE <code>S256(code_verifier) === code_challenge</code> (or requires
-            <code>client_secret</code> if PKCE was omitted; if both are present, both are checked), and checks the user is <code>active</code>.
-            Returns <code>access_token</code> (15m), <code>id_token</code> (1h, if <code>openid</code>), and <code>refresh_token</code> (30d, if <code>offline_access</code>).
-          </li>
-          <li>
-            <strong><code>refresh_token</code></strong>: Validates <code>refresh_token</code> against <code>app_id</code> and rotates it
-            (marks old token revoked, issues new <code>refresh_token</code> + fresh JWTs). <strong>Reuse detection:</strong> submitting an
-            already-revoked refresh token immediately revokes the entire token family.
-          </li>
-          <li>
-            <strong><code>client_credentials</code></strong>: Requires valid <code>client_id</code> + <code>client_secret</code>. Issues a
-            1-hour Ed25519 M2M <code>access_token</code> with <code>token_type: "app"</code> and <code>sub: client_id</code>.
-          </li>
-        </ul>
-        <pre class="code-block">{`200 OK (authorization_code / refresh_token)
+          <hr />
+          <h3 class="h6 fw-semibold"><code>POST /api/oauth/token</code></h3>
+          <p class="small mb-1">
+            <strong>Rate Limit:</strong> 60 req / 60s per IP · <strong>Content-Type:</strong>{' '}
+            <code>application/x-www-form-urlencoded</code> or <code>application/json</code> ·{' '}
+            <strong>Client Auth:</strong> HTTP Basic (<code>client_id:client_secret</code>) or body fields
+          </p>
+          <p class="small text-body-secondary mb-1">
+            <strong>Behavior by <code>grant_type</code>:</strong>
+          </p>
+          <ul class="small ps-3">
+            <li class="mb-1">
+              <strong><code>authorization_code</code></strong>: Atomically consumes the single-use <code>code</code> (60s TTL),
+              verifies <code>redirect_uri</code> matches, verifies PKCE <code>S256(code_verifier) === code_challenge</code> (or requires
+              <code>client_secret</code> if PKCE was omitted; if both are present, both are checked), and checks the user is <code>active</code>.
+              Returns <code>access_token</code> (15m), <code>id_token</code> (1h, if <code>openid</code>), and <code>refresh_token</code> (30d, if <code>offline_access</code>).
+            </li>
+            <li class="mb-1">
+              <strong><code>refresh_token</code></strong>: Validates <code>refresh_token</code> against <code>app_id</code> and rotates it
+              (marks old token revoked, issues new <code>refresh_token</code> + fresh JWTs). <strong>Reuse detection:</strong> submitting an
+              already-revoked refresh token immediately revokes the entire token family.
+            </li>
+            <li>
+              <strong><code>client_credentials</code></strong>: Requires valid <code>client_id</code> + <code>client_secret</code>. Issues a
+              1-hour Ed25519 M2M <code>access_token</code> with <code>token_type: "app"</code> and <code>sub: client_id</code>.
+            </li>
+          </ul>
+          <pre class="code-block mb-3">{`200 OK (authorization_code / refresh_token)
 {
   "token_type": "Bearer",
   "expires_in": 900,
@@ -247,15 +280,15 @@ claims = jwt.decode(
   "error_description": "Human-readable reason"
 }`}</pre>
 
-        <hr />
-        <h3><code>GET /api/oauth/userinfo</code></h3>
-        <p class="small"><strong>Auth:</strong> <code>Authorization: Bearer &lt;access_token&gt;</code> (user token only)</p>
-        <p class="small muted">
-          <strong>Behavior:</strong> Verifies the Ed25519 signature and expiration of the user <code>access_token</code>
-          (rejects M2M <code>token_type: "app"</code> tokens), queries the database to confirm the user is still <code>active</code>,
-          and returns live user claims filtered by the token's <code>scope</code>.
-        </p>
-        <pre class="code-block">{`200 OK
+          <hr />
+          <h3 class="h6 fw-semibold"><code>GET /api/oauth/userinfo</code></h3>
+          <p class="small mb-1"><strong>Auth:</strong> <code>Authorization: Bearer &lt;access_token&gt;</code> (user token only)</p>
+          <p class="small text-body-secondary">
+            <strong>Behavior:</strong> Verifies the Ed25519 signature and expiration of the user <code>access_token</code>
+            (rejects M2M <code>token_type: "app"</code> tokens), queries the database to confirm the user is still <code>active</code>,
+            and returns live user claims filtered by the token's <code>scope</code>.
+          </p>
+          <pre class="code-block mb-3">{`200 OK
 {
   "sub": "user-uuid",
   "name": "Joe Explorer",          // if scope includes 'profile'
@@ -267,16 +300,19 @@ claims = jwt.decode(
 
 401 Unauthorized: { "error": "invalid_token" }`}</pre>
 
-        <hr />
-        <h3><code>POST /api/oauth/introspect</code></h3>
-        <p class="small"><strong>Auth:</strong> Client credentials (HTTP Basic or body <code>client_id</code> + <code>client_secret</code>) · <strong>Rate Limit:</strong> 60 req / 60s</p>
-        <p class="small muted">
-          <strong>Behavior:</strong> RFC 7662 token introspection for backends that prefer server-side validation. Authenticates the
-          calling application (`401 invalid_client` if invalid), verifies the submitted <code>token</code>'s Ed25519 signature &amp;
-          expiration, and for user tokens verifies the user account is still <code>active</code> in D1. Always returns <code>200</code> with
-          <code>{`{ "active": false }`}</code> for invalid, expired, or suspended-user tokens.
-        </p>
-        <pre class="code-block">{`200 OK (active user token)
+          <hr />
+          <h3 class="h6 fw-semibold"><code>POST /api/oauth/introspect</code></h3>
+          <p class="small mb-1">
+            <strong>Auth:</strong> Client credentials (HTTP Basic or body <code>client_id</code> + <code>client_secret</code>) ·{' '}
+            <strong>Rate Limit:</strong> 60 req / 60s
+          </p>
+          <p class="small text-body-secondary">
+            <strong>Behavior:</strong> RFC 7662 token introspection for backends that prefer server-side validation. Authenticates the
+            calling application (`401 invalid_client` if invalid), verifies the submitted <code>token</code>'s Ed25519 signature &amp;
+            expiration, and for user tokens verifies the user account is still <code>active</code> in D1. Always returns <code>200</code> with{' '}
+            <code>{`{ "active": false }`}</code> for invalid, expired, or suspended-user tokens.
+          </p>
+          <pre class="code-block mb-3">{`200 OK (active user token)
 {
   "active": true,
   "iss": "${issuer}",
@@ -301,56 +337,73 @@ claims = jwt.decode(
 200 OK (inactive / expired / invalid): { "active": false }
 401 Unauthorized: { "error": "invalid_client" }`}</pre>
 
-        <hr />
-        <h3><code>POST /api/oauth/revoke</code></h3>
-        <p class="small"><strong>Rate Limit:</strong> 60 req / 60s · <strong>Body:</strong> <code>token=&lt;refresh_token&gt;</code></p>
-        <p class="small muted">
-          <strong>Behavior:</strong> Hashes the submitted <code>refresh_token</code> and marks it <code>revoked = 1</code> in D1.
-          Idempotent — always returns <code>200 {`{ "ok": true }`}</code> even if the token was already revoked or unknown.
-        </p>
-      </section>
-
-      <section class="card mt-1">
-        <h2>4. JWT Claims Reference (Ed25519 / EdDSA)</h2>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr><th>Token</th><th>TTL</th><th>Claims Included</th></tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>User <code>access_token</code></td>
-                <td>900s (15m)</td>
-                <td><code>iss</code>, <code>sub</code> (user ID), <code>aud</code> (<code>client_id</code>), <code>client_id</code>, <code>scope</code>, <code>token_type: "user"</code>, <code>role</code>, <code>iat</code>, <code>exp</code>, <code>jti</code></td>
-              </tr>
-              <tr>
-                <td>OIDC <code>id_token</code></td>
-                <td>3600s (1h)</td>
-                <td><code>iss</code>, <code>sub</code>, <code>aud</code>, <code>nonce</code> (if given), <code>name</code>/<code>role</code>/<code>developer_status</code> (<code>profile</code>), <code>email</code>/<code>email_verified</code> (<code>email</code>), <code>iat</code>, <code>exp</code>, <code>jti</code></td>
-              </tr>
-              <tr>
-                <td>App <code>access_token</code> (<code>client_credentials</code>)</td>
-                <td>3600s (1h)</td>
-                <td><code>iss</code>, <code>sub</code> (<code>client_id</code>), <code>aud</code> (<code>iss</code>), <code>client_id</code>, <code>app_id</code>, <code>owner_user_id</code>, <code>scope</code>, <code>token_type: "app"</code>, <code>iat</code>, <code>exp</code>, <code>jti</code></td>
-              </tr>
-            </tbody>
-          </table>
+          <hr />
+          <h3 class="h6 fw-semibold"><code>POST /api/oauth/revoke</code></h3>
+          <p class="small mb-1"><strong>Rate Limit:</strong> 60 req / 60s · <strong>Body:</strong> <code>token=&lt;refresh_token&gt;</code></p>
+          <p class="small text-body-secondary mb-0">
+            <strong>Behavior:</strong> Hashes the submitted <code>refresh_token</code> and marks it <code>revoked = 1</code> in D1.
+            Idempotent — always returns <code>200 {`{ "ok": true }`}</code> even if the token was already revoked or unknown.
+          </p>
         </div>
       </section>
 
-      <div class="grid-2 mt-1">
-        <section class="card">
-          <h3>5. Token Exchange &amp; M2M Examples</h3>
-          <pre class="code-block">{tokenExchangeSnippet}</pre>
-          <pre class="code-block mt-1">{clientCredentialsSnippet}</pre>
-          <pre class="code-block mt-1">{introspectSnippet}</pre>
-        </section>
+      <section class="card shadow-sm mb-4">
+        <div class="card-body">
+          <h2 class="h5 fw-semibold mb-3">
+            <i class="bi bi-card-checklist me-2 text-primary"></i>4. JWT Claims Reference (Ed25519 / EdDSA)
+          </h2>
+          <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+              <thead>
+                <tr><th>Token</th><th>TTL</th><th>Claims Included</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>User <code>access_token</code></td>
+                  <td>900s (15m)</td>
+                  <td><code>iss</code>, <code>sub</code> (user ID), <code>aud</code> (<code>client_id</code>), <code>client_id</code>, <code>scope</code>, <code>token_type: "user"</code>, <code>role</code>, <code>iat</code>, <code>exp</code>, <code>jti</code></td>
+                </tr>
+                <tr>
+                  <td>OIDC <code>id_token</code></td>
+                  <td>3600s (1h)</td>
+                  <td><code>iss</code>, <code>sub</code>, <code>aud</code>, <code>nonce</code> (if given), <code>name</code>/<code>role</code>/<code>developer_status</code> (<code>profile</code>), <code>email</code>/<code>email_verified</code> (<code>email</code>), <code>iat</code>, <code>exp</code>, <code>jti</code></td>
+                </tr>
+                <tr>
+                  <td>App <code>access_token</code> (<code>client_credentials</code>)</td>
+                  <td>3600s (1h)</td>
+                  <td><code>iss</code>, <code>sub</code> (<code>client_id</code>), <code>aud</code> (<code>iss</code>), <code>client_id</code>, <code>app_id</code>, <code>owner_user_id</code>, <code>scope</code>, <code>token_type: "app"</code>, <code>iat</code>, <code>exp</code>, <code>jti</code></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
 
-        <section class="card">
-          <h3>6. Local Ed25519 Verification</h3>
-          <pre class="code-block">{cfWorkerVerifySnippet}</pre>
-          <pre class="code-block mt-1">{pythonSnippet}</pre>
-        </section>
+      <div class="row g-4">
+        <div class="col-lg-6">
+          <section class="card shadow-sm h-100">
+            <div class="card-body">
+              <h3 class="h5 fw-semibold mb-3">
+                <i class="bi bi-code-slash me-2 text-primary"></i>5. Token Exchange &amp; M2M Examples
+              </h3>
+              <pre class="code-block mb-3">{tokenExchangeSnippet}</pre>
+              <pre class="code-block mb-3">{clientCredentialsSnippet}</pre>
+              <pre class="code-block">{introspectSnippet}</pre>
+            </div>
+          </section>
+        </div>
+
+        <div class="col-lg-6">
+          <section class="card shadow-sm h-100">
+            <div class="card-body">
+              <h3 class="h5 fw-semibold mb-3">
+                <i class="bi bi-shield-check me-2 text-primary"></i>6. Local Ed25519 Verification
+              </h3>
+              <pre class="code-block mb-3">{cfWorkerVerifySnippet}</pre>
+              <pre class="code-block">{pythonSnippet}</pre>
+            </div>
+          </section>
+        </div>
       </div>
     </Layout>
   );

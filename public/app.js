@@ -21,7 +21,7 @@
   function showAlert(el, msg, type = 'error') {
     if (!el) return;
     el.textContent = msg;
-    el.className = `alert ${type === 'success' ? 'alert-success' : 'alert-error'}`;
+    el.className = `alert ${type === 'success' ? 'alert-success' : 'alert-danger'}`;
   }
 
   function getTurnstileToken(form) {
@@ -278,17 +278,17 @@
     try {
       const rows = await api('/api/user/sessions');
       sessionsListEl.innerHTML = rows.length
-        ? `<table><thead><tr><th>Device / Agent</th><th>IP Hash</th><th>Last Active</th><th></th></tr></thead><tbody>${rows
+        ? `<table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Device / Agent</th><th>IP Hash</th><th>Last Active</th><th></th></tr></thead><tbody>${rows
             .map(
               (s) => `<tr>
-                <td>${esc(s.user_agent || 'Unknown')} ${s.is_current ? '<span class="badge badge-ok">Current</span>' : ''}</td>
+                <td>${esc(s.user_agent || 'Unknown')} ${s.is_current ? '<span class="badge text-bg-success">Current</span>' : ''}</td>
                 <td><code>${esc(s.ip_hash || '-')}</code></td>
                 <td>${new Date(s.last_seen_at * 1000).toLocaleString()}</td>
-                <td>${s.is_current ? '' : `<button class="btn btn-sm btn-ghost" data-revoke-session="${esc(s.id)}">Revoke</button>`}</td>
+                <td class="text-end">${s.is_current ? '' : `<button class="btn btn-sm btn-outline-secondary" data-revoke-session="${esc(s.id)}">Revoke</button>`}</td>
               </tr>`
             )
             .join('')}</tbody></table>`
-        : '<p>No active sessions.</p>';
+        : '<p class="mb-0">No active sessions.</p>';
       sessionsListEl.querySelectorAll('[data-revoke-session]').forEach((btn) => {
         btn.addEventListener('click', async () => {
           await api(`/api/user/sessions/${btn.dataset.revokeSession}`, { method: 'DELETE', body: {} });
@@ -313,17 +313,17 @@
     try {
       const rows = await api('/api/user/apps');
       connectedAppsEl.innerHTML = rows.length
-        ? `<table><thead><tr><th>App</th><th>Scopes</th><th>Granted</th><th></th></tr></thead><tbody>${rows
+        ? `<table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>App</th><th>Scopes</th><th>Granted</th><th></th></tr></thead><tbody>${rows
             .map(
               (a) => `<tr>
                 <td><a href="${esc(a.homepage_url)}" target="_blank" rel="noopener">${esc(a.name)}</a></td>
                 <td><code>${esc(a.scopes)}</code></td>
                 <td>${new Date(a.granted_at * 1000).toLocaleDateString()}</td>
-                <td><button class="btn btn-sm btn-ghost" data-revoke-app="${esc(a.app_id)}">Revoke</button></td>
+                <td class="text-end"><button class="btn btn-sm btn-outline-secondary" data-revoke-app="${esc(a.app_id)}">Revoke</button></td>
               </tr>`
             )
             .join('')}</tbody></table>`
-        : '<p>No connected applications yet.</p>';
+        : '<p class="mb-0">No connected applications yet.</p>';
       connectedAppsEl.querySelectorAll('[data-revoke-app]').forEach((btn) => {
         btn.addEventListener('click', async () => {
           await api(`/api/user/apps/${btn.dataset.revokeApp}`, { method: 'DELETE', body: {} });
@@ -339,16 +339,16 @@
   if (devHistoryEl) {
     api('/api/dev/status').then((res) => {
       devHistoryEl.innerHTML = res.applications.length
-        ? `<table><thead><tr><th>Reason</th><th>Status</th><th>Review Note</th></tr></thead><tbody>${res.applications
+        ? `<table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Reason</th><th>Status</th><th>Review Note</th></tr></thead><tbody>${res.applications
             .map(
               (a) => `<tr>
                 <td>${esc(a.reason)}</td>
-                <td><span class="badge ${a.status === 'approved' ? 'badge-ok' : a.status === 'pending' ? 'badge-warn' : 'badge-bad'}">${esc(a.status)}</span></td>
+                <td><span class="badge ${a.status === 'approved' ? 'text-bg-success' : a.status === 'pending' ? 'text-bg-warning' : 'text-bg-danger'}">${esc(a.status)}</span></td>
                 <td>${esc(a.review_note || '-')}</td>
               </tr>`
             )
             .join('')}</tbody></table>`
-        : '<p>No applications submitted yet.</p>';
+        : '<p class="mb-0">No applications submitted yet.</p>';
     }).catch(() => {});
   }
 
@@ -379,22 +379,24 @@
       devAppsEl.innerHTML = apps.length
         ? apps
             .map(
-              (a) => `<div class="card mt-1">
-                <div class="section-head">
-                  <strong>${esc(a.name)}</strong>
-                  <span class="badge ${a.status === 'approved' ? 'badge-ok' : 'badge-bad'}">${esc(a.status)}</span>
-                </div>
-                <div class="small">Client ID: <code>${esc(a.client_id)}</code></div>
-                <div class="small muted">Secret Prefix: <code>${esc(a.client_secret_prefix)}...</code></div>
-                <div class="small muted">Redirects: ${a.redirect_uris.map((u) => `<code>${esc(u)}</code>`).join(', ')}</div>
-                <div class="btn-row mt-1">
-                  <button class="btn btn-sm btn-ghost" data-rotate-app="${esc(a.id)}">Rotate Secret</button>
-                  <button class="btn btn-sm btn-danger" data-delete-app="${esc(a.id)}">Delete</button>
+              (a) => `<div class="card bg-body-tertiary border mb-2">
+                <div class="card-body p-3">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <strong>${esc(a.name)}</strong>
+                    <span class="badge ${a.status === 'approved' ? 'text-bg-success' : 'text-bg-danger'}">${esc(a.status)}</span>
+                  </div>
+                  <div class="small">Client ID: <code>${esc(a.client_id)}</code></div>
+                  <div class="small text-body-secondary">Secret Prefix: <code>${esc(a.client_secret_prefix)}...</code></div>
+                  <div class="small text-body-secondary">Redirects: ${a.redirect_uris.map((u) => `<code>${esc(u)}</code>`).join(', ')}</div>
+                  <div class="d-flex gap-2 mt-2">
+                    <button class="btn btn-sm btn-outline-secondary" data-rotate-app="${esc(a.id)}"><i class="bi bi-arrow-repeat me-1"></i>Rotate Secret</button>
+                    <button class="btn btn-sm btn-danger" data-delete-app="${esc(a.id)}"><i class="bi bi-trash me-1"></i>Delete</button>
+                  </div>
                 </div>
               </div>`
             )
             .join('')
-        : '<p>No OAuth applications created yet.</p>';
+        : '<p class="mb-0">No OAuth applications created yet.</p>';
 
       devAppsEl.querySelectorAll('[data-rotate-app]').forEach((btn) => {
         btn.addEventListener('click', async () => {
@@ -470,7 +472,7 @@
 
       const auditEl = document.getElementById('admin-audit-list');
       auditEl.innerHTML = data.recentAuditLogs.length
-        ? `<table><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th>Metadata</th></tr></thead><tbody>${data.recentAuditLogs
+        ? `<table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th>Metadata</th></tr></thead><tbody>${data.recentAuditLogs
             .map(
               (l) => `<tr>
                 <td>${new Date(l.created_at * 1000).toLocaleString()}</td>
@@ -481,7 +483,7 @@
               </tr>`
             )
             .join('')}</tbody></table>`
-        : '<p>No audit logs yet.</p>';
+        : '<p class="mb-0">No audit logs yet.</p>';
     }
 
     document.getElementById('setting-require-email-verify')?.addEventListener('change', async (e) => {
@@ -498,19 +500,19 @@
       const data = await api('/api/admin/rules');
       const el = document.getElementById('admin-rules-list');
       el.innerHTML = data.rules.length
-        ? `<table><thead><tr><th>Priority</th><th>Type</th><th>Regex Pattern</th><th>Description</th><th>Active</th><th></th></tr></thead><tbody>${data.rules
+        ? `<table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Priority</th><th>Type</th><th>Regex Pattern</th><th>Description</th><th>Active</th><th></th></tr></thead><tbody>${data.rules
             .map(
               (r) => `<tr>
                 <td>${r.priority}</td>
-                <td><span class="badge ${r.rule_type === 'allow' ? 'badge-ok' : 'badge-bad'}">${esc(r.rule_type)}</span></td>
+                <td><span class="badge ${r.rule_type === 'allow' ? 'text-bg-success' : 'text-bg-danger'}">${esc(r.rule_type)}</span></td>
                 <td><code>${esc(r.pattern)}</code></td>
                 <td>${esc(r.description)}</td>
-                <td><button class="btn btn-sm btn-ghost" data-toggle-rule="${esc(r.id)}" data-active="${r.is_active}">${r.is_active ? 'Enabled' : 'Disabled'}</button></td>
-                <td><button class="btn btn-sm btn-danger" data-del-rule="${esc(r.id)}">Delete</button></td>
+                <td><button class="btn btn-sm btn-outline-secondary" data-toggle-rule="${esc(r.id)}" data-active="${r.is_active}">${r.is_active ? 'Enabled' : 'Disabled'}</button></td>
+                <td class="text-end"><button class="btn btn-sm btn-danger" data-del-rule="${esc(r.id)}">Delete</button></td>
               </tr>`
             )
             .join('')}</tbody></table>`
-        : '<p class="alert alert-error">No registration rules exist yet — all registrations are currently denied by default.</p>';
+        : '<div class="alert alert-danger mb-0">No registration rules exist yet — all registrations are currently denied by default.</div>';
 
       el.querySelectorAll('[data-toggle-rule]').forEach((btn) => {
         btn.addEventListener('click', async () => {
@@ -566,31 +568,31 @@
       const res = await api('/api/admin/rules/test', { method: 'POST', body: { email: fd.get('email') } });
       const out = document.getElementById('rule-test-result');
       out.textContent = `${res.allowed ? 'ALLOWED' : 'DENIED'} — ${res.reason}`;
-      out.className = `small ${res.allowed ? 'text-ok' : ''}`;
+      out.className = `small fw-semibold ${res.allowed ? 'text-success' : 'text-danger'}`;
     });
 
     async function loadDevApplications() {
       const rows = await api('/api/admin/dev-applications');
       const el = document.getElementById('admin-dev-apps-list');
       el.innerHTML = rows.length
-        ? `<table><thead><tr><th>User</th><th>Reason</th><th>Status</th><th>Actions</th></tr></thead><tbody>${rows
+        ? `<table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>User</th><th>Reason</th><th>Status</th><th>Actions</th></tr></thead><tbody>${rows
             .map(
               (a) => `<tr>
-                <td>${esc(a.user_name)}<br><span class="muted">${esc(a.user_email)}</span></td>
+                <td>${esc(a.user_name)}<br><span class="text-body-secondary">${esc(a.user_email)}</span></td>
                 <td>${esc(a.reason)}</td>
-                <td><span class="badge ${a.status === 'approved' ? 'badge-ok' : a.status === 'pending' ? 'badge-warn' : 'badge-bad'}">${esc(a.status)}</span></td>
+                <td><span class="badge ${a.status === 'approved' ? 'text-bg-success' : a.status === 'pending' ? 'text-bg-warning' : 'text-bg-danger'}">${esc(a.status)}</span></td>
                 <td>
                   ${a.status === 'pending'
-                    ? `<div class="btn-row">
-                        <button class="btn btn-sm btn-primary" data-dev-decision="approved" data-id="${esc(a.id)}">Approve</button>
-                        <button class="btn btn-sm btn-danger" data-dev-decision="rejected" data-id="${esc(a.id)}">Reject</button>
+                    ? `<div class="d-flex gap-2">
+                        <button class="btn btn-sm btn-primary" data-dev-decision="approved" data-id="${esc(a.id)}"><i class="bi bi-check-lg me-1"></i>Approve</button>
+                        <button class="btn btn-sm btn-danger" data-dev-decision="rejected" data-id="${esc(a.id)}"><i class="bi bi-x-lg me-1"></i>Reject</button>
                       </div>`
-                    : `<span class="muted">${esc(a.reviewed_by || '')}</span>`}
+                    : `<span class="text-body-secondary">${esc(a.reviewed_by || '')}</span>`}
                 </td>
               </tr>`
             )
             .join('')}</tbody></table>`
-        : '<p>No developer applications.</p>';
+        : '<p class="mb-0">No developer applications.</p>';
 
       el.querySelectorAll('[data-dev-decision]').forEach((btn) => {
         btn.addEventListener('click', async () => {
@@ -610,24 +612,24 @@
       const rows = await api(`/api/admin/users?q=${encodeURIComponent(q)}`);
       const el = document.getElementById('admin-users-list');
       el.innerHTML = rows.length
-        ? `<table><thead><tr><th>User</th><th>Role</th><th>Dev</th><th>Status</th><th>Actions</th></tr></thead><tbody>${rows
+        ? `<table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>User</th><th>Role</th><th>Dev</th><th>Status</th><th>Actions</th></tr></thead><tbody>${rows
             .map(
               (u) => `<tr>
-                <td><strong>${esc(u.name)}</strong><br><span class="muted">${esc(u.email)}</span> ${u.email_verified ? '✓' : '<span class="badge badge-warn">unverified</span>'}</td>
-                <td><span class="badge ${u.role === 'admin' ? 'badge-ok' : ''}">${esc(u.role)}</span></td>
-                <td><span class="badge">${esc(u.developer_status)}</span></td>
-                <td><span class="badge ${u.status === 'active' ? 'badge-ok' : 'badge-bad'}">${esc(u.status)}</span></td>
+                <td><strong>${esc(u.name)}</strong><br><span class="text-body-secondary">${esc(u.email)}</span> ${u.email_verified ? '✓' : '<span class="badge text-bg-warning">unverified</span>'}</td>
+                <td><span class="badge ${u.role === 'admin' ? 'text-bg-success' : 'text-bg-secondary'}">${esc(u.role)}</span></td>
+                <td><span class="badge text-bg-secondary">${esc(u.developer_status)}</span></td>
+                <td><span class="badge ${u.status === 'active' ? 'text-bg-success' : 'text-bg-danger'}">${esc(u.status)}</span></td>
                 <td>
-                  <div class="btn-row">
-                    <button class="btn btn-sm btn-ghost" data-toggle-user="${esc(u.id)}" data-status="${u.status}">${u.status === 'active' ? 'Suspend' : 'Activate'}</button>
-                    ${!u.email_verified ? `<button class="btn btn-sm btn-ghost" data-verify-user="${esc(u.id)}">Verify Email</button>` : ''}
-                    ${isSuperuser ? `<button class="btn btn-sm btn-ghost" data-role-user="${esc(u.id)}" data-next-role="${u.role === 'admin' ? 'user' : 'admin'}">${u.role === 'admin' ? 'Demote Admin' : 'Make Admin'}</button>` : ''}
+                  <div class="d-flex flex-wrap gap-2">
+                    <button class="btn btn-sm btn-outline-secondary" data-toggle-user="${esc(u.id)}" data-status="${u.status}">${u.status === 'active' ? 'Suspend' : 'Activate'}</button>
+                    ${!u.email_verified ? `<button class="btn btn-sm btn-outline-secondary" data-verify-user="${esc(u.id)}">Verify Email</button>` : ''}
+                    ${isSuperuser ? `<button class="btn btn-sm btn-outline-secondary" data-role-user="${esc(u.id)}" data-next-role="${u.role === 'admin' ? 'user' : 'admin'}">${u.role === 'admin' ? 'Demote Admin' : 'Make Admin'}</button>` : ''}
                   </div>
                 </td>
               </tr>`
             )
             .join('')}</tbody></table>`
-        : '<p>No users found.</p>';
+        : '<p class="mb-0">No users found.</p>';
 
       el.querySelectorAll('[data-toggle-user]').forEach((btn) => {
         btn.addEventListener('click', async () => {
@@ -667,23 +669,23 @@
       const rows = await api('/api/admin/apps');
       const el = document.getElementById('admin-apps-list');
       el.innerHTML = rows.length
-        ? `<table><thead><tr><th>Name</th><th>Client ID</th><th>Owner</th><th>Status</th><th>Actions</th></tr></thead><tbody>${rows
+        ? `<table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Name</th><th>Client ID</th><th>Owner</th><th>Status</th><th>Actions</th></tr></thead><tbody>${rows
             .map(
               (a) => `<tr>
-                <td><strong>${esc(a.name)}</strong><br><span class="muted">${esc(a.homepage_url)}</span></td>
+                <td><strong>${esc(a.name)}</strong><br><span class="text-body-secondary">${esc(a.homepage_url)}</span></td>
                 <td><code>${esc(a.client_id)}</code></td>
                 <td>${esc(a.owner_email)}</td>
-                <td><span class="badge ${a.status === 'approved' ? 'badge-ok' : 'badge-bad'}">${esc(a.status)}</span> ${a.is_first_party ? '<span class="badge badge-ok">1st-party</span>' : ''}</td>
+                <td><span class="badge ${a.status === 'approved' ? 'text-bg-success' : 'text-bg-danger'}">${esc(a.status)}</span> ${a.is_first_party ? '<span class="badge text-bg-info">1st-party</span>' : ''}</td>
                 <td>
-                  <div class="btn-row">
-                    <button class="btn btn-sm btn-ghost" data-app-status="${esc(a.id)}" data-next="${a.status === 'approved' ? 'suspended' : 'approved'}">${a.status === 'approved' ? 'Suspend' : 'Restore'}</button>
-                    <button class="btn btn-sm btn-ghost" data-app-fp="${esc(a.id)}" data-fp="${a.is_first_party ? '0' : '1'}">${a.is_first_party ? 'Unmark 1st-party' : 'Mark 1st-party'}</button>
+                  <div class="d-flex flex-wrap gap-2">
+                    <button class="btn btn-sm btn-outline-secondary" data-app-status="${esc(a.id)}" data-next="${a.status === 'approved' ? 'suspended' : 'approved'}">${a.status === 'approved' ? 'Suspend' : 'Restore'}</button>
+                    <button class="btn btn-sm btn-outline-secondary" data-app-fp="${esc(a.id)}" data-fp="${a.is_first_party ? '0' : '1'}">${a.is_first_party ? 'Unmark 1st-party' : 'Mark 1st-party'}</button>
                   </div>
                 </td>
               </tr>`
             )
             .join('')}</tbody></table>`
-        : '<p>No OAuth apps registered.</p>';
+        : '<p class="mb-0">No OAuth apps registered.</p>';
 
       el.querySelectorAll('[data-app-status]').forEach((btn) => {
         btn.addEventListener('click', async () => {
