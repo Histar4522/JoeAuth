@@ -1,0 +1,20 @@
+# Copy this file to `.dev.vars` for local `wrangler dev`.
+# Never commit `.dev.vars` to version control!
+# Tip: Run `npm run gen:keys -- "your-superuser-password"` to generate all secrets below.
+
+# 1. 64-char lowercase hex SHA-256 digest of your Superuser password
+SUPERUSER_PASSWORD_HASH=
+
+# 2. High-entropy random secret used to pepper passwords & client secrets (min 32 bytes hex)
+PASSWORD_PEPPER=
+
+# 3. Ed25519 JWK pair (single-line JSON strings) used to sign & verify JoeAuth JWTs
+JWT_PRIVATE_JWK=
+JWT_PUBLIC_JWK=
+
+# 4. Cloudflare Turnstile Secret Key
+# Local test key below ALWAYS passes; replace with your real Turnstile secret in production (`wrangler secret put`)
+TURNSTILE_SECRET_KEY=1x0000000000000000000000000000000AA
+
+# 5. Resend API Key (https://resend.com/api-keys) for verification & password reset emails
+RESEND_API_KEY=

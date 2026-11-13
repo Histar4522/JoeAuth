@@ -4,13 +4,22 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy --minify",
-    "cf-typegen": "wrangler types --env-interface CloudflareBindings"
+    "cf-typegen": "wrangler types --env-interface CloudflareBindings",
+    "test": "vitest run",
+    "test:server": "node test/oauth-test-server.mjs",
+    "typecheck": "tsc --noEmit",
+    "gen:keys": "node scripts/gen-keys.mjs",
+    "db:migrate:local": "wrangler d1 migrations apply joe-auth-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply joe-auth-db --remote"
   },
   "dependencies": {
-    "hono": "^4.13.16"
+    "hono": "^4.13.16",
+    "uqr": "^0.1.3"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.23.0",
     "@types/node": "^26.6.6",
+    "vitest": "^4.1.12",
     "wrangler": "^4.161.0"
   }
 }
