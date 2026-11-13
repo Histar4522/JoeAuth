@@ -16,12 +16,29 @@ export function isHttpsRequest(c: Context<AppEnv>): boolean {
   return url.protocol === 'https:' || c.req.header('x-forwarded-proto') === 'https';
 }
 
+export function sanitizeReturnTo(raw: string | undefined, fallback = '/account'): string {
+  const val = (raw || '').trim();
+  if (!val.startsWith('/') || val.startsWith('//') || val.startsWith('/\\')) {
+    return fallback;
+  }
+  try {
+    const u = new URL(val, 'https://placeholder.invalid');
+    if (u.origin !== 'https://placeholder.invalid') return fallback;
+    return `${u.pathname}${u.search}${u.hash}`;
+  } catch {
+    return fallback;
+  }
+}
+
 export function getClientIp(c: Context<AppEnv>): string {
-  return (
-    c.req.header('cf-connecting-ip') ||
-    c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ||
-    '127.0.0.1'
-  );
+  const cfIp = c.req.header('cf-connecting-ip')?.trim();
+  if (cfIp) return cfIp;
+  const xff = c.req.header('x-forwarded-for');
+  if (xff) {
+    const parts = xff.split(',').map((s) => s.trim()).filter(Boolean);
+    if (parts.length > 0) return parts[parts.length - 1];
+  }
+  return '127.0.0.1';
 }
 
 export async function getIpHash(c: Context<AppEnv>): Promise<string> {
@@ -81,7 +98,7 @@ function writeActiveCookie(c: Context<AppEnv>, sessionId: string | null, maxAge 
 export async function createSession(
   c: Context<AppEnv>,
   opts: { userId: string; isSuperuser?: boolean }
-): Promise<string> {
+): Promise<{ sessionId: string; slot: string; userCount: number }> {
   const rawToken = randomBase64Url(32);
   const tokenHash = await sha256Hex(rawToken);
   const now = nowSec();
@@ -90,16 +107,19 @@ export async function createSession(
   const ipHash = await getIpHash(c);
   const ua = (c.req.header('user-agent') || '').slice(0, 200);
 
-  // Deduplicate existing browser session for the same userId / superuser
+  // Deduplicate existing browser session for the same userId / superuser, preserving slot positions
   const existingTokens = readRawTokensFromCookies(c);
   const keptTokens: string[] = [];
+  const keptIsSuperuser: boolean[] = [];
+  let replaceIdx = -1;
+
   if (existingTokens.length > 0) {
     const existingHashes = await Promise.all(existingTokens.map(sha256Hex));
     const placeholders = existingHashes.map(() => '?').join(',');
     const { results } = await c.env.DB.prepare(
-      `SELECT id, user_id, is_superuser FROM sessions WHERE id IN (${placeholders})`
+      `SELECT id, user_id, is_superuser FROM sessions WHERE id IN (${placeholders}) AND expires_at > ?`
     )
-      .bind(...existingHashes)
+      .bind(...existingHashes, now)
       .all<Pick<SessionRow, 'id' | 'user_id' | 'is_superuser'>>();
 
     const byHash = new Map((results || []).map((r) => [r.id, r]));
@@ -113,8 +133,14 @@ export async function createSession(
         : row.is_superuser === 0 && row.user_id === opts.userId;
       if (sameAccount) {
         staleIds.push(h);
+        if (replaceIdx === -1) {
+          replaceIdx = keptTokens.length;
+          keptTokens.push(rawToken);
+          keptIsSuperuser.push(Boolean(opts.isSuperuser));
+        }
       } else {
         keptTokens.push(existingTokens[i]);
+        keptIsSuperuser.push(row.is_superuser === 1);
       }
     }
     if (staleIds.length > 0) {
@@ -130,11 +156,32 @@ export async function createSession(
     .bind(tokenHash, opts.userId, opts.isSuperuser ? 1 : 0, ipHash, ua, expiresAt, now, now)
     .run();
 
-  const updatedTokens = [...keptTokens, rawToken].slice(-MAX_BROWSER_SESSIONS);
+  if (replaceIdx === -1) {
+    keptTokens.push(rawToken);
+    keptIsSuperuser.push(Boolean(opts.isSuperuser));
+  }
+  const offset = Math.max(0, keptTokens.length - MAX_BROWSER_SESSIONS);
+  const updatedTokens = keptTokens.slice(offset);
+  const updatedSuperFlags = keptIsSuperuser.slice(offset);
+  const finalIdx = (replaceIdx === -1 ? keptTokens.length - 1 : replaceIdx) - offset;
+
+  let slot = 'superuser';
+  if (!opts.isSuperuser) {
+    let userIdx = 0;
+    for (let i = 0; i < updatedSuperFlags.length; i++) {
+      if (i === finalIdx) {
+        slot = String(userIdx);
+        break;
+      }
+      if (!updatedSuperFlags[i]) userIdx++;
+    }
+  }
+  const userCount = updatedSuperFlags.filter((isSu) => !isSu).length;
+
   writeSessionsCookie(c, updatedTokens);
   writeActiveCookie(c, tokenHash, ttl);
 
-  return tokenHash;
+  return { sessionId: tokenHash, slot, userCount };
 }
 
 export async function switchActiveSession(c: Context<AppEnv>, targetSessionId: string): Promise<boolean> {
@@ -147,6 +194,8 @@ export async function switchActiveSession(c: Context<AppEnv>, targetSessionId: s
   writeActiveCookie(c, target.sessionId, ttl);
   c.set('auth', {
     sessionId: target.sessionId,
+    slot: target.slot,
+    basePath: auth.basePath,
     isSuperuser: target.isSuperuser,
     user: target.user,
     accounts: auth.accounts,
@@ -177,7 +226,7 @@ export async function destroySession(
     return;
   }
 
-  const targetHash = opts.sessionId || activeHash;
+  const targetHash = opts.sessionId || c.get('auth')?.sessionId || activeHash;
   if (!targetHash) return;
 
   const targetIdx = tokenHashes.indexOf(targetHash);
@@ -231,6 +280,7 @@ export async function resolveSession(c: Context<AppEnv>): Promise<AuthContext | 
   const accounts: ResolvedAccountSession[] = [];
   const deadSessionIds: string[] = [];
   const staleSeenIds: string[] = [];
+  let userSlotIdx = 0;
 
   for (let i = 0; i < rawTokens.length; i++) {
     const hash = tokenHashes[i];
@@ -239,7 +289,13 @@ export async function resolveSession(c: Context<AppEnv>): Promise<AuthContext | 
 
     if (s.is_superuser === 1) {
       validRawTokens.push(rawTokens[i]);
-      accounts.push({ sessionId: s.id, isSuperuser: true, user: null, lastSeenAt: s.last_seen_at });
+      accounts.push({
+        sessionId: s.id,
+        slot: 'superuser',
+        isSuperuser: true,
+        user: null,
+        lastSeenAt: s.last_seen_at,
+      });
       if (now - s.last_seen_at > 300) staleSeenIds.push(s.id);
     } else {
       const user = userMap.get(s.user_id);
@@ -248,7 +304,13 @@ export async function resolveSession(c: Context<AppEnv>): Promise<AuthContext | 
         continue;
       }
       validRawTokens.push(rawTokens[i]);
-      accounts.push({ sessionId: s.id, isSuperuser: false, user, lastSeenAt: s.last_seen_at });
+      accounts.push({
+        sessionId: s.id,
+        slot: String(userSlotIdx++),
+        isSuperuser: false,
+        user,
+        lastSeenAt: s.last_seen_at,
+      });
       if (now - s.last_seen_at > 300) staleSeenIds.push(s.id);
     }
   }
@@ -270,9 +332,24 @@ export async function resolveSession(c: Context<AppEnv>): Promise<AuthContext | 
     try { c.executionCtx.waitUntil(p); } catch { await p; }
   }
 
+  const requestedSlot = c.req.header('x-joe-slot')?.trim() || null;
+  const basePath = requestedSlot ? `/u/${requestedSlot}` : '';
+
   if (accounts.length === 0) {
     writeActiveCookie(c, null);
     return null;
+  }
+
+  if (requestedSlot) {
+    const matched = accounts.find((a) => a.slot === requestedSlot);
+    return {
+      sessionId: matched ? matched.sessionId : '',
+      slot: requestedSlot,
+      basePath,
+      isSuperuser: matched ? matched.isSuperuser : false,
+      user: matched ? matched.user : null,
+      accounts,
+    };
   }
 
   const activeCookie = getCookie(c, ACTIVE_COOKIE_NAME);
@@ -289,6 +366,8 @@ export async function resolveSession(c: Context<AppEnv>): Promise<AuthContext | 
 
   return {
     sessionId: activeMatch ? activeMatch.sessionId : '',
+    slot: activeMatch ? activeMatch.slot : null,
+    basePath: '',
     isSuperuser: activeMatch ? activeMatch.isSuperuser : false,
     user: activeMatch ? activeMatch.user : null,
     accounts,
@@ -311,4 +390,40 @@ export async function isEmailVerificationRequired(env: Bindings): Promise<boolea
 
 export function getPepper(env: Bindings): string {
   return env.PASSWORD_PEPPER || 'joeauth-dev-fallback-pepper';
+}
+
+export async function deleteUserAccountData(
+  db: D1Database,
+  bucket: R2Bucket,
+  userId: string,
+  avatarKey: string | null
+): Promise<void> {
+  const ownedApps = await db
+    .prepare('SELECT id, logo_key FROM apps WHERE owner_user_id = ?')
+    .bind(userId)
+    .all<{ id: string; logo_key: string | null }>();
+
+  const keysToDelete: string[] = [];
+  const ownedAppIds: string[] = [];
+  if (avatarKey) keysToDelete.push(avatarKey);
+  for (const row of ownedApps.results || []) {
+    ownedAppIds.push(row.id);
+    if (row.logo_key) keysToDelete.push(row.logo_key);
+  }
+  if (keysToDelete.length > 0) {
+    await Promise.allSettled(keysToDelete.map((key) => bucket.delete(key)));
+  }
+
+  const stmts: D1PreparedStatement[] = [
+    db.prepare('DELETE FROM sessions WHERE user_id = ?').bind(userId),
+    db.prepare('DELETE FROM refresh_tokens WHERE user_id = ?').bind(userId),
+    db.prepare('DELETE FROM oauth_codes WHERE user_id = ?').bind(userId),
+    db.prepare('DELETE FROM verification_tokens WHERE user_id = ?').bind(userId),
+  ];
+  for (const appId of ownedAppIds) {
+    stmts.push(db.prepare('DELETE FROM refresh_tokens WHERE app_id = ?').bind(appId));
+    stmts.push(db.prepare('DELETE FROM oauth_codes WHERE app_id = ?').bind(appId));
+  }
+  stmts.push(db.prepare('DELETE FROM users WHERE id = ?').bind(userId));
+  await db.batch(stmts);
 }

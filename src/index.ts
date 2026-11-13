@@ -9,9 +9,15 @@ import userRoutes from './routes/user';
 import devRoutes from './routes/dev';
 import adminRoutes from './routes/admin';
 import oauthRoutes from './routes/oauth';
+import mediaRoutes from './routes/media';
 import pageRoutes from './routes/pages';
 
 const app = new Hono<AppEnv>();
+
+app.use('/media/*', async (c, next) => {
+  await next();
+  c.header('Cross-Origin-Resource-Policy', 'cross-origin');
+});
 
 app.use(
   '*',
@@ -22,7 +28,7 @@ app.use(
       scriptSrc: ["'self'", 'https://challenges.cloudflare.com'],
       frameSrc: ["'self'", 'https://challenges.cloudflare.com'],
       styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", 'data:', 'https:'],
+      imgSrc: ["'self'", 'data:', 'blob:', 'https:'],
       connectSrc: ["'self'", 'https://challenges.cloudflare.com'],
     },
   })
@@ -30,12 +36,14 @@ app.use(
 
 app.use('/.well-known/*', cors({ origin: '*', allowMethods: ['GET', 'OPTIONS'] }));
 app.use('/api/oauth/*', cors({ origin: '*', allowMethods: ['GET', 'POST', 'OPTIONS'] }));
+app.use('/media/*', cors({ origin: '*', allowMethods: ['GET', 'OPTIONS'] }));
 
 app.use('*', sessionMiddleware);
 
 app.get('/api/health', (c) => c.json({ ok: true, service: c.env.APP_NAME || 'JoeAuth' }));
 
 app.route('/', oauthRoutes);
+app.route('/media', mediaRoutes);
 app.route('/api/auth', authRoutes);
 app.route('/api/user', userRoutes);
 app.route('/api/dev', devRoutes);
@@ -62,8 +70,36 @@ export async function runDailyCleanup(env: Bindings): Promise<void> {
   ]);
 }
 
+const SLOT_PATH_RE = /^\/u\/(superuser|[0-9]+)(\/.*)?$/;
+
+function rewriteSlotRequest(request: Request): Request {
+  const url = new URL(request.url);
+  const match = SLOT_PATH_RE.exec(url.pathname);
+  const headers = new Headers(request.headers);
+  // Strip any client-supplied internal header; slot only comes from the URL prefix
+  headers.delete('x-joe-slot');
+
+  if (!match) {
+    return new Request(request, { headers });
+  }
+
+  headers.set('x-joe-slot', match[1]);
+  url.pathname = match[2] || '/';
+  const init: RequestInit = {
+    method: request.method,
+    headers,
+    redirect: request.redirect,
+  };
+  if (request.method !== 'GET' && request.method !== 'HEAD') {
+    init.body = request.body;
+  }
+  return new Request(url.toString(), init);
+}
+
 export default {
-  fetch: app.fetch,
+  fetch(request: Request, env: Bindings, ctx: ExecutionContext) {
+    return app.fetch(rewriteSlotRequest(request), env, ctx);
+  },
   async scheduled(_controller: ScheduledController, env: Bindings, ctx: ExecutionContext) {
     ctx.waitUntil(runDailyCleanup(env));
   },

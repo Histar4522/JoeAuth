@@ -16,6 +16,7 @@ export const AdminPanel: FC<{
         class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4"
         id="admin-root"
         data-is-superuser={isSuperuser ? '1' : '0'}
+        data-current-user-id={auth.user?.id || ''}
       >
         <div>
           <h1 class="h3 fw-semibold mb-1">
@@ -34,7 +35,7 @@ export const AdminPanel: FC<{
               <div class="form-check form-switch mb-0">
                 <input class="form-check-input" type="checkbox" role="switch" id="setting-require-email-verify" />
                 <label class="form-check-label small fw-medium" for="setting-require-email-verify">
-                  Require Email Verification (Resend)
+                  Require Email Verification
                 </label>
               </div>
             </div>
@@ -126,7 +127,7 @@ export const AdminPanel: FC<{
               <input class="form-control" type="number" name="priority" value="100" required title="Priority (lower runs first)" />
             </div>
             <div class="col-md-4">
-              <input class="form-control font-monospace" type="text" name="pattern" required placeholder="^[^@]+@joeuniverse\.com$" />
+              <input class="form-control font-monospace" type="text" name="pattern" required placeholder="^[^@]+@example\.com$" />
             </div>
             <div class="col-md-3">
               <input class="form-control" type="text" name="description" placeholder="Rule description" />
@@ -140,7 +141,7 @@ export const AdminPanel: FC<{
 
           <form id="test-rule-form" class="row g-2 align-items-center mb-3">
             <div class="col-sm-6 col-md-5">
-              <input class="form-control" type="email" name="email" required placeholder="Test an email address (e.g. joe@joeuniverse.com)" />
+              <input class="form-control" type="email" name="email" required placeholder="Test an email address (e.g. joe@example.com)" />
             </div>
             <div class="col-auto">
               <button type="submit" class="btn btn-outline-secondary">
@@ -172,16 +173,34 @@ export const AdminPanel: FC<{
             <h2 class="h5 fw-semibold mb-0">
               <i class="bi bi-people me-2 text-primary"></i>Users &amp; Roles
             </h2>
-            <form id="admin-user-search-form" class="d-flex gap-2">
-              <input class="form-control form-control-sm" type="search" name="q" placeholder="Search email or name..." />
+            <form id="admin-user-search-form" class="d-flex flex-wrap gap-2 align-items-center">
+              <select class="form-select form-select-sm w-auto" name="status" title="Filter by account status">
+                <option value="all">All Statuses</option>
+                <option value="active">Active</option>
+                <option value="suspended">Suspended</option>
+              </select>
+              <select class="form-select form-select-sm w-auto" name="role" title="Filter by role">
+                <option value="all">All Roles</option>
+                <option value="user">User</option>
+                <option value="admin">Admin</option>
+              </select>
+              <select class="form-select form-select-sm w-auto" name="developerStatus" title="Filter by developer privilege">
+                <option value="all">All Dev Status</option>
+                <option value="approved">Dev Approved</option>
+                <option value="pending">Dev Pending</option>
+                <option value="revoked">Dev Revoked</option>
+                <option value="none">No Dev Access</option>
+              </select>
+              <input class="form-control form-control-sm w-auto" type="search" name="q" placeholder="Search email or name..." />
               <button type="submit" class="btn btn-sm btn-outline-secondary">
-                <i class="bi bi-search me-1"></i>Search
+                <i class="bi bi-search me-1"></i>Filter
               </button>
             </form>
           </div>
-          {!isSuperuser && (
-            <p class="text-body-secondary small mb-3">Note: Only the Superuser can promote or demote Admin roles.</p>
-          )}
+          <p class="text-body-secondary small mb-3">
+            Manage status, developer access, email verification, passwords, 2FA, sessions, and deletion.
+            {!isSuperuser && ' Only the Superuser can manage Admin roles or modify other Admin accounts.'}
+          </p>
           <div id="admin-users-list" class="table-responsive text-body-secondary small">Loading users...</div>
         </div>
       </section>
@@ -195,11 +214,86 @@ export const AdminPanel: FC<{
         </div>
       </section>
 
+      <section class="card shadow-sm mb-4">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+            <h2 class="h5 fw-semibold mb-0">
+              <i class="bi bi-broom me-2 text-primary"></i>Logs &amp; Data Maintenance
+            </h2>
+            <span class="small text-body-secondary">Purge categorized audit logs or expired transient records.</span>
+          </div>
+
+          <div class="mb-3">
+            <div class="small fw-semibold text-body-secondary mb-2">Purge Audit Logs by Category</div>
+            <div class="d-flex flex-wrap gap-2">
+              <button type="button" class="btn btn-sm btn-outline-warning" data-purge-audit="auth_failures">
+                <i class="bi bi-shield-exclamation me-1"></i>Failed Logins (<span id="count-log-failures">0</span>)
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" data-purge-audit="user">
+                <i class="bi bi-person-lines-fill me-1"></i>User Logs (<span id="count-log-user">0</span>)
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" data-purge-audit="dev">
+                <i class="bi bi-code-slash me-1"></i>Developer Logs (<span id="count-log-dev">0</span>)
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" data-purge-audit="oauth">
+                <i class="bi bi-key me-1"></i>OAuth Logs (<span id="count-log-oauth">0</span>)
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" data-purge-audit="admin">
+                <i class="bi bi-shield-lock me-1"></i>Admin Logs (<span id="count-log-admin">0</span>)
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" data-purge-audit="older_than_30d">
+                <i class="bi bi-calendar-minus me-1"></i>Older than 30d
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-danger" data-purge-audit="all">
+                <i class="bi bi-trash me-1"></i>All Audit Logs (<span id="count-log-total">0</span>)
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <div class="small fw-semibold text-body-secondary mb-2">Purge Stale Sessions &amp; Tokens</div>
+            <div class="d-flex flex-wrap gap-2">
+              <button type="button" class="btn btn-sm btn-outline-secondary" data-purge-maint="expired_sessions">
+                <i class="bi bi-clock-history me-1"></i>Expired Sessions (<span id="count-stale-sessions">0</span>)
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" data-purge-maint="expired_tokens">
+                <i class="bi bi-envelope-x me-1"></i>Expired Email/Reset Tokens (<span id="count-stale-tokens">0</span>)
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" data-purge-maint="expired_oauth_codes">
+                <i class="bi bi-code-square me-1"></i>Stale OAuth Codes (<span id="count-stale-codes">0</span>)
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" data-purge-maint="revoked_refresh_tokens">
+                <i class="bi bi-arrow-repeat me-1"></i>Revoked/Expired Refresh Tokens (<span id="count-stale-refresh">0</span>)
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-danger" data-purge-maint="all_stale">
+                <i class="bi bi-trash3 me-1"></i>Purge All Stale Data
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section class="card shadow-sm">
         <div class="card-body">
-          <h2 class="h5 fw-semibold mb-3">
-            <i class="bi bi-journal-text me-2 text-primary"></i>Recent Security Audit Logs
-          </h2>
+          <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+            <h2 class="h5 fw-semibold mb-0">
+              <i class="bi bi-journal-text me-2 text-primary"></i>Security Audit Logs
+            </h2>
+            <form id="admin-audit-filter-form" class="d-flex flex-wrap gap-2 align-items-center">
+              <select class="form-select form-select-sm w-auto" name="category" title="Filter audit log category">
+                <option value="all">All Categories</option>
+                <option value="auth_failures">Failed Logins</option>
+                <option value="user">User Activity</option>
+                <option value="dev">Developer Activity</option>
+                <option value="oauth">OAuth Activity</option>
+                <option value="admin">Admin &amp; Superuser</option>
+              </select>
+              <input class="form-control form-control-sm w-auto" type="search" name="q" placeholder="Filter action, actor, metadata..." />
+              <button type="submit" class="btn btn-sm btn-outline-secondary">
+                <i class="bi bi-funnel me-1"></i>Filter
+              </button>
+            </form>
+          </div>
           <div id="admin-audit-list" class="table-responsive text-body-secondary small">Loading audit logs...</div>
         </div>
       </section>

@@ -1,6 +1,6 @@
 # JoeAuth
 
-Centralized Single Sign-On (SSO) and OpenID Connect / OAuth 2.0 Identity Provider for the **Joe Universe**, built with **Hono** on **Cloudflare Workers** (`$0/mo` Free Tier).
+Centralized Single Sign-On (SSO) and OpenID Connect / OAuth 2.0 Identity Provider built with **Hono** on **Cloudflare Workers** (`$0/mo` Free Tier).
 
 ## Stack & Cloudflare Free-Tier Services
 - **Cloudflare Workers + Hono JSX**: Edge API & server-rendered HTML UI (`./src`).

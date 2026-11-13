@@ -90,6 +90,50 @@ body {
   flex-shrink: 0;
 }
 
+.app-icon-badge {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--bs-border-radius);
+  background: var(--bs-primary-bg-subtle);
+  color: var(--bs-primary-text-emphasis);
+  border: 1px solid var(--bs-border-color);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.cropper-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  z-index: 1080;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.cropper-dialog {
+  width: 100%;
+  max-width: 380px;
+}
+
+.cropper-canvas {
+  display: block;
+  width: 256px;
+  height: 256px;
+  margin: 0 auto;
+  border-radius: var(--bs-border-radius);
+  border: 1px solid var(--bs-border-color);
+  cursor: grab;
+  touch-action: none;
+}
+
+.cropper-canvas:active {
+  cursor: grabbing;
+}
+
 .account-meta {
   display: flex;
   flex-direction: column;

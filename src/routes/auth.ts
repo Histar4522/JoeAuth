@@ -17,6 +17,7 @@ import {
   switchActiveSession,
 } from '../lib/session';
 import { evaluateRegistrationEmail, getActiveRules } from '../lib/rules';
+import { pickRandomMildColor } from '../lib/images';
 import { verifyTurnstile } from '../lib/turnstile';
 import { passwordResetEmailContent, sendEmail, verificationEmailContent } from '../lib/email';
 import { writeAuditLog } from '../lib/audit';
@@ -56,7 +57,7 @@ authRoutes.post('/register', rateLimitMiddleware('auth'), requireCsrf, async (c)
   const ruleEval = evaluateRegistrationEmail(email, rules);
   if (!ruleEval.allowed) {
     return c.json(
-      { ok: false, error: { code: 'REGISTRATION_BLOCKED', message: ruleEval.reason } },
+      { ok: false, error: { code: 'REGISTRATION_BLOCKED', message: 'Registration is not available for this email address.' } },
       403
     );
   }
@@ -73,12 +74,13 @@ authRoutes.post('/register', rateLimitMiddleware('auth'), requireCsrf, async (c)
   const userId = crypto.randomUUID();
   const now = nowSec();
   const passwordHash = await hashPassword(password, getPepper(c.env));
+  const avatarColor = pickRandomMildColor();
 
   await c.env.DB.prepare(
-    `INSERT INTO users (id, email, name, password_hash, role, developer_status, status, email_verified, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'user', 'none', 'active', ?, ?, ?)`
+    `INSERT INTO users (id, email, name, password_hash, role, developer_status, status, email_verified, avatar_color, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'user', 'none', 'active', ?, ?, ?, ?)`
   )
-    .bind(userId, email, name, passwordHash, requireVerify ? 0 : 1, now, now)
+    .bind(userId, email, name, passwordHash, requireVerify ? 0 : 1, avatarColor, now, now)
     .run();
 
   const ipHash = await getIpHash(c);
@@ -117,12 +119,14 @@ authRoutes.post('/register', rateLimitMiddleware('auth'), requireCsrf, async (c)
     );
   }
 
-  await createSession(c, { userId });
+  const session = await createSession(c, { userId });
   return c.json(
     {
       ok: true,
       data: {
         requiresEmailVerification: false,
+        slot: session.slot,
+        userCount: session.userCount,
         user: { id: userId, email, name, role: 'user', developer_status: 'none' },
       },
     },
@@ -189,6 +193,13 @@ authRoutes.post('/login', rateLimitMiddleware('auth'), requireCsrf, async (c) =>
     }
     const validTotp = await verifyTotpCode(user.totp_secret, body.totpCode);
     if (!validTotp) {
+      await writeAuditLog(c.env.DB, {
+        actorId: user.id,
+        action: 'user.login_failed_totp',
+        targetType: 'user',
+        targetId: user.id,
+        ipHash,
+      });
       return c.json(
         { ok: false, error: { code: 'TOTP_INVALID', message: 'Invalid 2FA authenticator code.' } },
         401
@@ -196,7 +207,7 @@ authRoutes.post('/login', rateLimitMiddleware('auth'), requireCsrf, async (c) =>
     }
   }
 
-  await createSession(c, { userId: user.id });
+  const session = await createSession(c, { userId: user.id });
   await writeAuditLog(c.env.DB, {
     actorId: user.id,
     action: 'user.login',
@@ -208,6 +219,8 @@ authRoutes.post('/login', rateLimitMiddleware('auth'), requireCsrf, async (c) =>
   return c.json({
     ok: true,
     data: {
+      slot: session.slot,
+      userCount: session.userCount,
       user: {
         id: user.id,
         email: user.email,
@@ -223,6 +236,7 @@ authRoutes.get('/accounts', (c) => {
   const auth = c.get('auth');
   const accounts = (auth?.accounts || []).map((a) => ({
     sessionId: a.sessionId,
+    slot: a.slot,
     isActive: a.sessionId === auth?.sessionId,
     isSuperuser: a.isSuperuser,
     user: a.user
@@ -305,15 +319,27 @@ authRoutes.get('/verify-email', async (c) => {
       .bind(row.target_value, row.user_id)
       .first();
     if (taken) {
-      return c.html('<h1>Email Already In Use</h1><a href="/account">Back to account</a>', 409);
+      return wantsJson
+        ? c.json({ ok: false, error: { code: 'EMAIL_EXISTS', message: 'Email is already in use.' } }, 409)
+        : c.text('Email address is already in use.', 409);
     }
-    await c.env.DB.prepare('UPDATE users SET email = ?, email_verified = 1, updated_at = ? WHERE id = ?')
+    const upd = await c.env.DB.prepare(
+      "UPDATE users SET email = ?, email_verified = 1, updated_at = ? WHERE id = ? AND status = 'active'"
+    )
       .bind(row.target_value, now, row.user_id)
       .run();
+    if (!upd.meta.changes) {
+      return c.text('Account is not active.', 403);
+    }
   } else {
-    await c.env.DB.prepare('UPDATE users SET email_verified = 1, updated_at = ? WHERE id = ?')
+    const upd = await c.env.DB.prepare(
+      "UPDATE users SET email_verified = 1, updated_at = ? WHERE id = ? AND status = 'active'"
+    )
       .bind(now, row.user_id)
       .run();
+    if (!upd.meta.changes) {
+      return c.text('Account is not active.', 403);
+    }
   }
 
   await c.env.DB.prepare('DELETE FROM verification_tokens WHERE token_hash = ?').bind(tokenHash).run();

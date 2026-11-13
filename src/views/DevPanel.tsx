@@ -100,20 +100,48 @@ export const DevPanel: FC<{
                     <i class="bi bi-plus-circle me-2 text-primary"></i>Create Application Token
                   </h2>
                   <p class="text-body-secondary small mb-3">
-                    New applications are approved immediately for verified Joe Universe developers.
+                    New applications are approved immediately for approved developers.
                   </p>
                   <form id="create-app-form">
                     <div class="mb-3">
                       <label class="form-label" for="app-name">Application Name</label>
-                      <input id="app-name" class="form-control" type="text" name="name" required minlength={2} maxlength={64} placeholder="JoeNotes Web" />
+                      <input id="app-name" class="form-control" type="text" name="name" required minlength={2} maxlength={64} placeholder="Example App" />
                     </div>
                     <div class="mb-3">
                       <label class="form-label" for="app-url">Homepage URL</label>
-                      <input id="app-url" class="form-control" type="url" name="homepageUrl" required placeholder="https://notes.joeuniverse.com" />
+                      <input id="app-url" class="form-control" type="url" name="homepageUrl" required placeholder="https://app.example.com" />
                     </div>
                     <div class="mb-3">
-                      <label class="form-label" for="app-desc">Description</label>
-                      <input id="app-desc" class="form-control" type="text" name="description" maxlength={300} placeholder="Cloud notes for Joe Universe" />
+                      <label class="form-label" for="app-desc">App Description (optional)</label>
+                      <input id="app-desc" class="form-control" type="text" name="description" maxlength={300} placeholder="Describe what your application does" />
+                    </div>
+                    <div class="mb-3">
+                      <label class="form-label" for="app-priv-desc">Privilege Description (optional)</label>
+                      <textarea
+                        id="app-priv-desc"
+                        class="form-control"
+                        name="privilegeDescription"
+                        maxlength={400}
+                        rows={2}
+                        placeholder="Why does your app need profile or email data?"
+                      ></textarea>
+                    </div>
+                    <div class="mb-3">
+                      <div class="form-label mb-1">App Logo (optional, 256×256 PNG ≤ 128 KiB)</div>
+                      <div class="d-flex align-items-center gap-3 p-2 rounded bg-body-tertiary border">
+                        <span id="create-app-logo-preview" class="app-icon-badge" style="width:48px;height:48px;font-size:24px;">
+                          <i class="bi bi-app-indicator"></i>
+                        </span>
+                        <div class="d-flex flex-wrap gap-2">
+                          <label class="btn btn-sm btn-outline-primary mb-0" for="create-app-logo-input">
+                            <i class="bi bi-crop me-1"></i>Choose Logo
+                          </label>
+                          <input id="create-app-logo-input" type="file" accept="image/*" class="d-none" />
+                          <button type="button" id="clear-create-app-logo-btn" class="btn btn-sm btn-outline-secondary hidden">
+                            <i class="bi bi-x-lg me-1"></i>Clear
+                          </button>
+                        </div>
+                      </div>
                     </div>
                     <div class="mb-3">
                       <label class="form-label" for="app-redirects">Allowed Redirect URIs (one per line)</label>
@@ -123,7 +151,7 @@ export const DevPanel: FC<{
                         name="redirectUris"
                         required
                         rows={3}
-                        placeholder="https://notes.joeuniverse.com/callback&#10;http://127.0.0.1:8788/callback"
+                        placeholder="https://app.example.com/callback&#10;http://127.0.0.1:8788/callback"
                       ></textarea>
                     </div>
                     <div class="mb-3">

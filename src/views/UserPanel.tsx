@@ -1,6 +1,7 @@
 import type { FC } from 'hono/jsx';
 import type { AuthContext } from '../types';
 import { Layout } from './Layout';
+import { UserAvatar } from './components/Media';
 
 export const UserPanel: FC<{
   appName: string;
@@ -10,17 +11,18 @@ export const UserPanel: FC<{
   const user = auth.user!;
   return (
     <Layout title="Account" auth={auth} csrfToken={csrfToken} showNav>
-      <div class="mb-4">
-        <h1 class="h3 fw-semibold mb-1">
-          <i class="bi bi-person-circle me-2 text-primary"></i>{user.name}
-        </h1>
-        <p class="text-body-secondary mb-0">
-          {user.email}{' '}
-          <span class={`badge ${user.email_verified ? 'text-bg-success' : 'text-bg-warning'}`}>
-            <i class={`bi ${user.email_verified ? 'bi-patch-check' : 'bi-exclamation-circle'} me-1`}></i>
-            {user.email_verified ? 'Verified' : 'Unverified'}
-          </span>
-        </p>
+      <div class="d-flex align-items-center gap-3 mb-4">
+        <UserAvatar user={user} size={52} id="account-header-avatar" />
+        <div>
+          <h1 class="h3 fw-semibold mb-1">{user.name}</h1>
+          <p class="text-body-secondary mb-0">
+            {user.email}{' '}
+            <span class={`badge ${user.email_verified ? 'text-bg-success' : 'text-bg-warning'}`}>
+              <i class={`bi ${user.email_verified ? 'bi-patch-check' : 'bi-exclamation-circle'} me-1`}></i>
+              {user.email_verified ? 'Verified' : 'Unverified'}
+            </span>
+          </p>
+        </div>
       </div>
 
       <div id="panel-alert" class="alert hidden"></div>
@@ -32,6 +34,28 @@ export const UserPanel: FC<{
               <h2 class="h5 fw-semibold mb-3">
                 <i class="bi bi-person-vcard me-2 text-primary"></i>Profile
               </h2>
+              <div class="d-flex align-items-center gap-3 p-3 rounded bg-body-tertiary border mb-3">
+                <UserAvatar user={user} size={64} id="avatar-preview" />
+                <div class="flex-grow-1 min-w-0">
+                  <div class="fw-semibold small mb-1">Profile Picture</div>
+                  <div class="text-body-secondary small mb-2">
+                    Optional 256×256 PNG (max 128 KiB). Cropped in your browser and shared via <code>profile</code> scope.
+                  </div>
+                  <div class="d-flex flex-wrap gap-2">
+                    <label class="btn btn-sm btn-outline-primary mb-0" for="avatar-file-input">
+                      <i class="bi bi-crop me-1"></i>Choose &amp; Crop Picture
+                    </label>
+                    <input id="avatar-file-input" type="file" accept="image/*" class="d-none" />
+                    <button
+                      type="button"
+                      id="remove-avatar-btn"
+                      class={`btn btn-sm btn-outline-secondary ${user.avatar_key ? '' : 'hidden'}`}
+                    >
+                      <i class="bi bi-trash me-1"></i>Remove
+                    </button>
+                  </div>
+                </div>
+              </div>
               <form id="profile-form">
                 <div class="mb-3">
                   <label class="form-label" for="profile-name">Display Name</label>
@@ -49,7 +73,7 @@ export const UserPanel: FC<{
               <form id="email-form">
                 <div class="mb-3">
                   <label class="form-label" for="new-email">New Email Address</label>
-                  <input id="new-email" class="form-control" type="email" name="newEmail" required placeholder="new@joeuniverse.com" />
+                  <input id="new-email" class="form-control" type="email" name="newEmail" required placeholder="joe@example.com" />
                 </div>
                 <div class="mb-3">
                   <label class="form-label" for="email-cur-pwd">Current Password</label>
@@ -150,7 +174,7 @@ export const UserPanel: FC<{
       <section class="card shadow-sm mt-4">
         <div class="card-body">
           <h2 class="h5 fw-semibold mb-3">
-            <i class="bi bi-grid me-2 text-primary"></i>Connected Joe Universe Apps
+            <i class="bi bi-grid me-2 text-primary"></i>Connected Apps
           </h2>
           <div id="connected-apps-list" class="table-responsive text-body-secondary small">Loading connected apps...</div>
         </div>

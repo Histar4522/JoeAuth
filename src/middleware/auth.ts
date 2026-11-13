@@ -42,12 +42,14 @@ export const requireCsrf = createMiddleware<AppEnv>(async (c, next) => {
     const reqProto = reqUrl.protocol.replace(':', '');
     const host = c.req.header('host');
     if (host) allowedOrigins.add(`${reqProto}://${host}`);
-    const fwdHost = c.req.header('x-forwarded-host');
-    const fwdProto = c.req.header('x-forwarded-proto') || reqProto;
-    if (fwdHost) allowedOrigins.add(`${fwdProto}://${fwdHost}`);
+    if (c.env.ISSUER_URL) {
+      try {
+        allowedOrigins.add(new URL(c.env.ISSUER_URL).origin);
+      } catch {}
+    }
 
     if (origin === 'null') {
-      if (secFetchSite && secFetchSite !== 'same-origin') {
+      if (secFetchSite !== 'same-origin') {
         return c.json({ ok: false, error: { code: 'CSRF_ORIGIN_MISMATCH', message: 'Invalid request origin.' } }, 403);
       }
     } else if (!allowedOrigins.has(origin)) {

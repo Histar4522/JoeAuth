@@ -1,6 +1,7 @@
 import type { FC } from 'hono/jsx';
 import type { ResolvedAccountSession } from '../types';
 import { Layout } from './Layout';
+import { AppLogo, UserAvatar } from './components/Media';
 
 export const AccountChooserPage: FC<{
   csrfToken: string;
@@ -8,6 +9,7 @@ export const AccountChooserPage: FC<{
   returnTo?: string;
   oauthParams?: {
     appName: string;
+    appLogoUrl?: string | null;
     client_id: string;
     redirect_uri: string;
     response_type: string;
@@ -19,6 +21,7 @@ export const AccountChooserPage: FC<{
   };
 }> = ({ csrfToken, accounts, returnTo = '/account', oauthParams }) => {
   const userAccounts = accounts.filter((a) => !a.isSuperuser && a.user);
+  const hasSuperuser = !oauthParams && accounts.some((a) => a.isSuperuser);
   const effectiveReturnTo = oauthParams
     ? `/oauth/authorize?${new URLSearchParams({
         client_id: oauthParams.client_id,
@@ -40,16 +43,24 @@ export const AccountChooserPage: FC<{
     <Layout title={oauthParams ? `Continue to ${oauthParams.appName}` : 'Choose an account'} csrfToken={csrfToken}>
       <div class="card shadow-sm auth-card">
         <div class="card-body p-4">
-          <h1 class="h4 fw-semibold mb-3">
-            <i class="bi bi-people me-2 text-primary"></i>
-            {oauthParams ? `Continue to ${oauthParams.appName}` : 'Choose an account'}
+          <h1 class="h4 fw-semibold mb-3 d-flex align-items-center gap-2">
+            {oauthParams ? (
+              <>
+                <AppLogo appName={oauthParams.appName} logoUrl={oauthParams.appLogoUrl} size={36} />
+                <span>Continue to {oauthParams.appName}</span>
+              </>
+            ) : (
+              <>
+                <i class="bi bi-people text-primary"></i>
+                <span>Choose an account</span>
+              </>
+            )}
           </h1>
           <div id="form-alert" class="alert hidden"></div>
 
           <div class="d-grid gap-2">
             {userAccounts.map((acc) => {
               const u = acc.user!;
-              const initial = (u.name || u.email || '?').trim().charAt(0).toUpperCase();
               return (
                 <div class="d-flex align-items-stretch gap-2" key={acc.sessionId}>
                   {oauthParams ? (
@@ -65,7 +76,7 @@ export const AccountChooserPage: FC<{
                       <input type="hidden" name="code_challenge_method" value={oauthParams.code_challenge_method} />
                       <input type="hidden" name="nonce" value={oauthParams.nonce} />
                       <button type="submit" class="account-btn">
-                        <span class="avatar-circle">{initial}</span>
+                        <UserAvatar user={u} size={38} />
                         <span class="account-meta">
                           <strong>{u.name}</strong>
                           <span class="text-body-secondary small">{u.email}</span>
@@ -77,9 +88,11 @@ export const AccountChooserPage: FC<{
                       type="button"
                       class="account-btn flex-grow-1"
                       data-switch-session={acc.sessionId}
+                      data-target-slot={acc.slot}
+                      data-multi-user={userAccounts.length > 1 ? '1' : '0'}
                       data-return-to={effectiveReturnTo}
                     >
-                      <span class="avatar-circle">{initial}</span>
+                      <UserAvatar user={u} size={38} />
                       <span class="account-meta">
                         <strong>{u.name}</strong>
                         <span class="text-body-secondary small">{u.email}</span>
@@ -100,6 +113,11 @@ export const AccountChooserPage: FC<{
           </div>
 
           <div class="d-grid gap-2 mt-3 pt-3 border-top">
+            {hasSuperuser && (
+              <a class="btn btn-outline-success" href="/u/superuser/admin">
+                <i class="bi bi-shield-lock me-1"></i>Superuser Admin Console
+              </a>
+            )}
             <a class="btn btn-outline-secondary" href={addAccountHref}>
               <i class="bi bi-person-plus me-1"></i>Use another account
             </a>
@@ -147,7 +165,7 @@ export const LoginPage: FC<{
               name="email"
               required
               autocomplete="email"
-              placeholder="you@example.com"
+              placeholder="joe@example.com"
             />
           </div>
           <div class="mb-3">
@@ -222,7 +240,7 @@ export const RegisterPage: FC<{
               name="email"
               required
               autocomplete="email"
-              placeholder="you@example.com"
+              placeholder="joe@example.com"
             />
           </div>
           <div class="mb-3">

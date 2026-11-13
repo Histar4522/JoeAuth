@@ -11,8 +11,15 @@ import {
   verifyPassword,
   verifyTotpCode,
 } from '../lib/crypto';
-import { destroyCurrentSession, getIpHash, getPepper, isEmailVerificationRequired } from '../lib/session';
+import {
+  deleteUserAccountData,
+  destroyCurrentSession,
+  getIpHash,
+  getPepper,
+  isEmailVerificationRequired,
+} from '../lib/session';
 import { evaluateRegistrationEmail, getActiveRules } from '../lib/rules';
+import { extractUploadedPng, getAppLogoUrl, getUserAvatarUrl } from '../lib/images';
 import { sendEmail, verificationEmailContent } from '../lib/email';
 import { writeAuditLog } from '../lib/audit';
 import { requireCsrf, requireUser } from '../middleware/auth';
@@ -33,7 +40,77 @@ userRoutes.get('/me', (c) => {
       developer_status: user.developer_status,
       email_verified: user.email_verified === 1,
       totp_enabled: user.totp_enabled === 1,
+      avatar_color: user.avatar_color,
+      avatar_url: getUserAvatarUrl('', user.id, user.avatar_version),
+      has_custom_avatar: Boolean(user.avatar_key),
       created_at: user.created_at,
+    },
+  });
+});
+
+userRoutes.post('/avatar', requireCsrf, async (c) => {
+  const user = c.get('auth')!.user!;
+  const parsed = await extractUploadedPng(c.req.raw, ['file', 'avatar']);
+  if (!parsed.ok) {
+    return c.json({ ok: false, error: { code: 'INVALID_IMAGE', message: parsed.message } }, 400);
+  }
+
+  const nextVersion = (user.avatar_version || 0) + 1;
+  const key = `avatars/${user.id}/v${nextVersion}.png`;
+  await c.env.MEDIA_BUCKET.put(key, parsed.bytes, {
+    httpMetadata: { contentType: 'image/png' },
+  });
+
+  if (user.avatar_key && user.avatar_key !== key) {
+    await c.env.MEDIA_BUCKET.delete(user.avatar_key).catch(() => {});
+  }
+
+  await c.env.DB.prepare('UPDATE users SET avatar_key = ?, avatar_version = ?, updated_at = ? WHERE id = ?')
+    .bind(key, nextVersion, nowSec(), user.id)
+    .run();
+
+  await writeAuditLog(c.env.DB, {
+    actorId: user.id,
+    action: 'user.avatar_updated',
+    targetType: 'user',
+    targetId: user.id,
+    ipHash: await getIpHash(c),
+  });
+
+  return c.json({
+    ok: true,
+    data: {
+      avatar_url: getUserAvatarUrl('', user.id, nextVersion),
+      avatar_version: nextVersion,
+      has_custom_avatar: true,
+    },
+  });
+});
+
+userRoutes.delete('/avatar', requireCsrf, async (c) => {
+  const user = c.get('auth')!.user!;
+  if (user.avatar_key) {
+    await c.env.MEDIA_BUCKET.delete(user.avatar_key).catch(() => {});
+  }
+  const nextVersion = (user.avatar_version || 0) + 1;
+  await c.env.DB.prepare('UPDATE users SET avatar_key = NULL, avatar_version = ?, updated_at = ? WHERE id = ?')
+    .bind(nextVersion, nowSec(), user.id)
+    .run();
+
+  await writeAuditLog(c.env.DB, {
+    actorId: user.id,
+    action: 'user.avatar_deleted',
+    targetType: 'user',
+    targetId: user.id,
+    ipHash: await getIpHash(c),
+  });
+
+  return c.json({
+    ok: true,
+    data: {
+      avatar_url: getUserAvatarUrl('', user.id, nextVersion),
+      avatar_version: nextVersion,
+      has_custom_avatar: false,
     },
   });
 });
@@ -69,7 +146,7 @@ userRoutes.post('/change-email', requireCsrf, async (c) => {
   const rules = await getActiveRules(c.env);
   const ruleEval = evaluateRegistrationEmail(newEmail, rules);
   if (!ruleEval.allowed) {
-    return c.json({ ok: false, error: { code: 'EMAIL_RULE_BLOCKED', message: ruleEval.reason } }, 403);
+    return c.json({ ok: false, error: { code: 'EMAIL_RULE_BLOCKED', message: 'This email address is not permitted.' } }, 403);
   }
 
   const taken = await c.env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(newEmail).first();
@@ -133,6 +210,7 @@ userRoutes.post('/change-password', requireCsrf, async (c) => {
   await c.env.DB.batch([
     c.env.DB.prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?').bind(newHash, nowSec(), user.id),
     c.env.DB.prepare('DELETE FROM sessions WHERE user_id = ? AND id != ?').bind(user.id, auth.sessionId),
+    c.env.DB.prepare("DELETE FROM verification_tokens WHERE user_id = ? AND purpose = 'password_reset'").bind(user.id),
   ]);
 
   await writeAuditLog(c.env.DB, {
@@ -188,16 +266,34 @@ userRoutes.delete('/sessions', requireCsrf, async (c) => {
 userRoutes.get('/apps', async (c) => {
   const user = c.get('auth')!.user!;
   const { results } = await c.env.DB.prepare(
-    `SELECT uc.app_id, uc.scopes, uc.granted_at, a.name, a.homepage_url, a.client_id
+    `SELECT uc.app_id, uc.scopes, uc.granted_at, a.name, a.description, a.privilege_description, a.homepage_url, a.client_id, a.logo_key, a.logo_version
      FROM user_consents uc
      JOIN apps a ON a.id = uc.app_id
      WHERE uc.user_id = ?
      ORDER BY uc.granted_at DESC`
   )
     .bind(user.id)
-    .all<{ app_id: string; scopes: string; granted_at: number; name: string; homepage_url: string; client_id: string }>();
+    .all<{
+      app_id: string;
+      scopes: string;
+      granted_at: number;
+      name: string;
+      description: string;
+      privilege_description: string;
+      homepage_url: string;
+      client_id: string;
+      logo_key: string | null;
+      logo_version: number;
+    }>();
 
-  return c.json({ ok: true, data: results || [] });
+  return c.json({
+    ok: true,
+    data: (results || []).map(({ logo_key, logo_version, ...row }) => ({
+      ...row,
+      has_custom_logo: Boolean(logo_key),
+      logo_url: logo_key ? getAppLogoUrl('', row.app_id, logo_version) : null,
+    })),
+  });
 });
 
 userRoutes.delete('/apps/:appId', requireCsrf, async (c) => {
@@ -277,13 +373,7 @@ userRoutes.delete('/account', requireCsrf, async (c) => {
     ipHash: await getIpHash(c),
   });
 
-  await c.env.DB.batch([
-    c.env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(user.id),
-    c.env.DB.prepare('DELETE FROM refresh_tokens WHERE user_id = ?').bind(user.id),
-    c.env.DB.prepare('DELETE FROM oauth_codes WHERE user_id = ?').bind(user.id),
-    c.env.DB.prepare('DELETE FROM verification_tokens WHERE user_id = ?').bind(user.id),
-    c.env.DB.prepare('DELETE FROM users WHERE id = ?').bind(user.id),
-  ]);
+  await deleteUserAccountData(c.env.DB, c.env.MEDIA_BUCKET, user.id, user.avatar_key);
 
   await destroyCurrentSession(c);
   return c.json({ ok: true, data: { deleted: true } });

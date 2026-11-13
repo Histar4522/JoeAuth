@@ -12,6 +12,7 @@ import {
   verifyEd25519Jwt,
 } from '../lib/crypto';
 import { getIpHash, getPepper, switchActiveSession } from '../lib/session';
+import { getAppLogoUrl, getUserAvatarUrl } from '../lib/images';
 import { writeAuditLog } from '../lib/audit';
 import { requireCsrf } from '../middleware/auth';
 import { rateLimitMiddleware } from '../middleware/rateLimit';
@@ -32,8 +33,29 @@ function appendQuery(baseUri: string, params: Record<string, string>): string {
   return u.toString();
 }
 
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function filterAllowedScopes(rawScope: string, allowedScopesJson: string): string[] {
+  const appScopes = new Set(JSON.parse(allowedScopesJson) as string[]);
+  const requested = rawScope
+    .split(/\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s && appScopes.has(s));
+  if (requested.length === 0) requested.push('openid');
+  return Array.from(new Set(requested));
+}
+
 function renderOAuthError(title: string, detail: string) {
-  return `<!doctype html><html lang="en" data-bs-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${title}</title><script src="/theme.js"></script><link rel="stylesheet" href="/vendor/bootstrap.min.css"><link rel="stylesheet" href="/vendor/bootstrap-icons.min.css"><link rel="stylesheet" href="/styles.css"></head><body class="centered-body"><main class="minimal-main"><div class="card shadow-sm auth-card"><div class="card-body p-4"><h1 class="h4 fw-semibold mb-3"><i class="bi bi-exclamation-triangle-fill text-danger me-2"></i>${title}</h1><div class="alert alert-danger">${detail}</div><a class="btn btn-outline-secondary" href="/"><i class="bi bi-arrow-left me-1"></i>Back to JoeAuth</a></div></div></main></body></html>`;
+  const safeTitle = escapeHtml(title);
+  const safeDetail = escapeHtml(detail);
+  return `<!doctype html><html lang="en" data-bs-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${safeTitle}</title><script src="/theme.js"></script><link rel="stylesheet" href="/vendor/bootstrap.min.css"><link rel="stylesheet" href="/vendor/bootstrap-icons.min.css"><link rel="stylesheet" href="/styles.css"></head><body class="centered-body"><main class="minimal-main"><div class="card shadow-sm auth-card"><div class="card-body p-4"><h1 class="h4 fw-semibold mb-3"><i class="bi bi-exclamation-triangle-fill text-danger me-2"></i>${safeTitle}</h1><div class="alert alert-danger">${safeDetail}</div><a class="btn btn-outline-secondary" href="/"><i class="bi bi-arrow-left me-1"></i>Back to JoeAuth</a></div></div></main></body></html>`;
 }
 
 // --- OIDC Discovery & JWKS ---
@@ -55,7 +77,7 @@ oauthRoutes.get('/.well-known/openid-configuration', (c) => {
     token_endpoint_auth_methods_supported: ['client_secret_post', 'client_secret_basic', 'none'],
     scopes_supported: ['openid', 'profile', 'email', 'offline_access'],
     code_challenge_methods_supported: ['S256'],
-    claims_supported: ['sub', 'iss', 'aud', 'exp', 'iat', 'name', 'email', 'email_verified', 'role', 'developer_status'],
+    claims_supported: ['sub', 'iss', 'aud', 'exp', 'iat', 'name', 'picture', 'email', 'email_verified', 'role', 'developer_status'],
   });
 });
 
@@ -168,6 +190,7 @@ oauthRoutes.get('/oauth/authorize', async (c) => {
         accounts={userAccounts}
         oauthParams={{
           appName: app.name,
+          appLogoUrl: app.logo_key ? getAppLogoUrl('', app.id, app.logo_version) : null,
           client_id: clientId,
           redirect_uri: redirectUri,
           response_type: responseType,
@@ -181,13 +204,8 @@ oauthRoutes.get('/oauth/authorize', async (c) => {
     );
   }
 
-  const appScopes = new Set(JSON.parse(app.allowed_scopes) as string[]);
-  const requestedScopes = rawScope
-    .split(/\s+/)
-    .map((s) => s.trim())
-    .filter((s) => s && appScopes.has(s));
-  if (requestedScopes.length === 0) requestedScopes.push('openid');
-  const scopeStr = Array.from(new Set(requestedScopes)).join(' ');
+  const requestedScopes = filterAllowedScopes(rawScope, app.allowed_scopes);
+  const scopeStr = requestedScopes.join(' ');
 
   // Skip consent for first-party apps or previously consented scopes
   const existingConsent = await c.env.DB.prepare(
@@ -287,7 +305,8 @@ oauthRoutes.post('/oauth/authorize', requireCsrf, async (c) => {
     return c.redirect(appendQuery(redirectUri, { error: 'access_denied', state }));
   }
 
-  const scopesArr = scopeStr.split(/\s+/).filter(Boolean);
+  const scopesArr = filterAllowedScopes(scopeStr, app.allowed_scopes);
+  const effectiveScopeStr = scopesArr.join(' ');
   await c.env.DB.prepare(
     `INSERT INTO user_consents (user_id, app_id, scopes, granted_at) VALUES (?, ?, ?, ?)
      ON CONFLICT(user_id, app_id) DO UPDATE SET scopes = excluded.scopes, granted_at = excluded.granted_at`
@@ -299,7 +318,7 @@ oauthRoutes.post('/oauth/authorize', requireCsrf, async (c) => {
     app,
     user: auth.user,
     redirectUri,
-    scope: scopeStr,
+    scope: effectiveScopeStr,
     state,
     codeChallenge,
     codeChallengeMethod,
@@ -378,7 +397,12 @@ async function buildUserTokenSet(
       aud: opts.app.client_id,
       ...(opts.nonce ? { nonce: opts.nonce } : {}),
       ...(scopes.includes('profile')
-        ? { name: opts.user.name, role: opts.user.role, developer_status: opts.user.developer_status }
+        ? {
+            name: opts.user.name,
+            picture: getUserAvatarUrl(issuer, opts.user.id, opts.user.avatar_version),
+            role: opts.user.role,
+            developer_status: opts.user.developer_status,
+          }
         : {}),
       ...(scopes.includes('email')
         ? { email: opts.user.email, email_verified: opts.user.email_verified === 1 }
@@ -430,7 +454,7 @@ oauthRoutes.post('/api/oauth/token', rateLimitMiddleware('token'), async (c) => 
     .bind(clientId, 'approved')
     .first<AppRow>();
   if (!app) {
-    return c.json({ error: 'invalid_client', error_description: 'Unknown or suspended client_id' }, 401);
+    return c.json({ error: 'invalid_client', error_description: 'Client authentication failed' }, 401);
   }
 
   const pepper = getPepper(c.env);
@@ -470,21 +494,21 @@ oauthRoutes.post('/api/oauth/token', rateLimitMiddleware('token'), async (c) => 
       .bind(codeHash)
       .run();
     if (!consume.meta.changes) {
-      return c.json({ error: 'invalid_grant', error_description: 'Authorization code already used' }, 400);
+      return c.json({ error: 'invalid_grant', error_description: 'Authorization code is invalid or expired' }, 400);
     }
 
     // Verify PKCE and/or client_secret
     if (codeRow.code_challenge) {
       const computed = await sha256Base64Url(codeVerifier);
       if (!codeVerifier || computed !== codeRow.code_challenge) {
-        return c.json({ error: 'invalid_grant', error_description: 'PKCE code_verifier mismatch' }, 400);
+        return c.json({ error: 'invalid_grant', error_description: 'Authorization code is invalid or expired' }, 400);
       }
       if (clientSecret && !(await verifyClientSecret(app, clientSecret, pepper))) {
-        return c.json({ error: 'invalid_client', error_description: 'Invalid client_secret' }, 401);
+        return c.json({ error: 'invalid_client', error_description: 'Client authentication failed' }, 401);
       }
     } else {
       if (!clientSecret || !(await verifyClientSecret(app, clientSecret, pepper))) {
-        return c.json({ error: 'invalid_client', error_description: 'client_secret or PKCE is required' }, 401);
+        return c.json({ error: 'invalid_client', error_description: 'Client authentication failed' }, 401);
       }
     }
 
@@ -492,7 +516,7 @@ oauthRoutes.post('/api/oauth/token', rateLimitMiddleware('token'), async (c) => 
       .bind(codeRow.user_id)
       .first<UserRow>();
     if (!user) {
-      return c.json({ error: 'invalid_grant', error_description: 'User account is no longer active' }, 400);
+      return c.json({ error: 'invalid_grant', error_description: 'Authorization code is invalid or expired' }, 400);
     }
 
     const tokens = await buildUserTokenSet(c, {
@@ -510,7 +534,7 @@ oauthRoutes.post('/api/oauth/token', rateLimitMiddleware('token'), async (c) => 
       return c.json({ error: 'invalid_request', error_description: 'refresh_token is required' }, 400);
     }
     if (clientSecret && !(await verifyClientSecret(app, clientSecret, pepper))) {
-      return c.json({ error: 'invalid_client', error_description: 'Invalid client_secret' }, 401);
+      return c.json({ error: 'invalid_client', error_description: 'Client authentication failed' }, 401);
     }
 
     const tokenHash = await sha256Hex(rawRefresh);
@@ -526,21 +550,27 @@ oauthRoutes.post('/api/oauth/token', rateLimitMiddleware('token'), async (c) => 
       }>();
 
     if (!row || row.expires_at <= nowSec()) {
-      return c.json({ error: 'invalid_grant', error_description: 'Refresh token invalid or expired' }, 400);
+      return c.json({ error: 'invalid_grant', error_description: 'Refresh token is invalid or expired' }, 400);
     }
     if (row.revoked === 1) {
-      // Reuse detected -> revoke entire token family!
       await c.env.DB.prepare('UPDATE refresh_tokens SET revoked = 1 WHERE family_id = ?').bind(row.family_id).run();
-      return c.json({ error: 'invalid_grant', error_description: 'Refresh token reuse detected; family revoked' }, 400);
+      return c.json({ error: 'invalid_grant', error_description: 'Refresh token is invalid or revoked' }, 400);
     }
 
-    await c.env.DB.prepare('UPDATE refresh_tokens SET revoked = 1 WHERE id = ?').bind(row.id).run();
+    // Consume refresh token atomically to prevent concurrent double-rotation race
+    const revokeRes = await c.env.DB.prepare('UPDATE refresh_tokens SET revoked = 1 WHERE id = ? AND revoked = 0')
+      .bind(row.id)
+      .run();
+    if (!revokeRes.meta.changes) {
+      await c.env.DB.prepare('UPDATE refresh_tokens SET revoked = 1 WHERE family_id = ?').bind(row.family_id).run();
+      return c.json({ error: 'invalid_grant', error_description: 'Refresh token is invalid or revoked' }, 400);
+    }
 
     const user = await c.env.DB.prepare("SELECT * FROM users WHERE id = ? AND status = 'active'")
       .bind(row.user_id)
       .first<UserRow>();
     if (!user) {
-      return c.json({ error: 'invalid_grant', error_description: 'User is no longer active' }, 400);
+      return c.json({ error: 'invalid_grant', error_description: 'Refresh token is invalid or expired' }, 400);
     }
 
     const tokens = await buildUserTokenSet(c, {
@@ -554,13 +584,17 @@ oauthRoutes.post('/api/oauth/token', rateLimitMiddleware('token'), async (c) => 
 
   if (grantType === 'client_credentials') {
     if (!clientSecret || !(await verifyClientSecret(app, clientSecret, pepper))) {
-      return c.json({ error: 'invalid_client', error_description: 'Valid client_secret required' }, 401);
+      return c.json({ error: 'invalid_client', error_description: 'Client authentication failed' }, 401);
     }
     if (!c.env.JWT_PRIVATE_JWK) {
-      return c.json({ error: 'server_error', error_description: 'Signing key not configured' }, 500);
+      return c.json({ error: 'server_error', error_description: 'Service temporarily unavailable' }, 500);
     }
 
-    const scope = params.scope || 'app:service';
+    const requestedScope = (params.scope || '').trim();
+    const scope =
+      requestedScope && /^[a-zA-Z0-9_:.\-\s]{1,128}$/.test(requestedScope)
+        ? requestedScope
+        : 'app:service';
     const accessToken = await signEd25519Jwt(
       {
         iss: getIssuer(c),
@@ -619,6 +653,7 @@ oauthRoutes.get('/api/oauth/userinfo', async (c) => {
   const claims: Record<string, unknown> = { sub: user.id };
   if (scopes.includes('profile')) {
     claims.name = user.name;
+    claims.picture = getUserAvatarUrl(getIssuer(c), user.id, user.avatar_version);
     claims.role = user.role;
     claims.developer_status = user.developer_status;
   }
@@ -656,10 +691,18 @@ oauthRoutes.post('/api/oauth/introspect', rateLimitMiddleware('token'), async (c
 
   if (payload.token_type === 'user' && typeof payload.sub === 'string') {
     const user = await c.env.DB.prepare(
-      "SELECT id, email, name, role, developer_status, email_verified FROM users WHERE id = ? AND status = 'active'"
+      "SELECT id, email, name, role, developer_status, email_verified, avatar_version FROM users WHERE id = ? AND status = 'active'"
     )
       .bind(payload.sub)
-      .first<{ id: string; email: string; name: string; role: string; developer_status: string; email_verified: number }>();
+      .first<{
+        id: string;
+        email: string;
+        name: string;
+        role: string;
+        developer_status: string;
+        email_verified: number;
+        avatar_version: number;
+      }>();
     if (!user) return c.json({ active: false });
 
     return c.json({
@@ -669,6 +712,7 @@ oauthRoutes.post('/api/oauth/introspect', rateLimitMiddleware('token'), async (c
         id: user.id,
         email: user.email,
         name: user.name,
+        picture: getUserAvatarUrl(getIssuer(c), user.id, user.avatar_version),
         role: user.role,
         developer_status: user.developer_status,
         email_verified: user.email_verified === 1,

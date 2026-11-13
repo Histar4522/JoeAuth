@@ -39,7 +39,7 @@ class CookieJar {
 async function req(
   path: string,
   jar: CookieJar,
-  opts: { method?: string; body?: unknown; form?: URLSearchParams; headers?: Record<string, string> } = {}
+  opts: { method?: string; body?: unknown; form?: URLSearchParams; rawBody?: BodyInit; headers?: Record<string, string> } = {}
 ) {
   if (!jar.csrf()) {
     const init = await SELF.fetch('http://localhost/api/health');
@@ -51,8 +51,10 @@ async function req(
     Origin: 'http://localhost',
     ...(opts.headers || {}),
   };
-  let body: string | undefined;
-  if (opts.form) {
+  let body: BodyInit | undefined;
+  if (opts.rawBody !== undefined) {
+    body = opts.rawBody;
+  } else if (opts.form) {
     headers['Content-Type'] = 'application/x-www-form-urlencoded';
     body = opts.form.toString();
   } else if (opts.body !== undefined) {
@@ -67,6 +69,17 @@ async function req(
   });
   jar.capture(resp);
   return resp;
+}
+
+function makeTestPng(width: number, height: number, size = 64): Uint8Array {
+  const buf = new Uint8Array(Math.max(size, 33));
+  buf.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  const view = new DataView(buf.buffer);
+  view.setUint32(8, 13, false);
+  buf.set([0x49, 0x48, 0x44, 0x52], 12);
+  view.setUint32(16, width, false);
+  view.setUint32(20, height, false);
+  return buf;
 }
 
 describe('JoeAuth End-to-End Workers Flow', () => {
@@ -108,17 +121,20 @@ describe('JoeAuth End-to-End Workers Flow', () => {
     const userJar = new CookieJar();
     const superJar = new CookieJar();
 
-    // 1. Registration blocked by default (no rules yet)
+    // 1. Registration blocked by default (no rules yet) — ensure no internal policy details leak
     const blockedReg = await req('/api/auth/register', userJar, {
       method: 'POST',
       body: {
-        name: 'Joe Dev',
-        email: 'joe@joeuniverse.com',
+        name: 'Joe Doe',
+        email: 'joe@example.com',
         password: 'StrongPassword123',
         turnstileToken: 'test-token',
       },
     });
     expect(blockedReg.status).toBe(403);
+    const blockedRegText = await blockedReg.text();
+    expect(blockedRegText).not.toContain('default deny');
+    expect(blockedRegText).not.toContain('allow rule');
 
     // 2. Superuser logs in via SHA-256 secret and adds domain allow rule
     const suLogin = await req('/api/admin/superuser/login', superJar, {
@@ -137,16 +153,16 @@ describe('JoeAuth End-to-End Workers Flow', () => {
       method: 'POST',
       body: {
         ruleType: 'allow',
-        pattern: '^[^@]+@joeuniverse\\.com$',
+        pattern: '^[^@]+@example\\.com$',
         priority: 100,
-        description: 'Joe Universe Domain',
+        description: 'Example Domain',
       },
     });
     expect(addRule.status).toBe(201);
 
     const testRule = await req('/api/admin/rules/test', superJar, {
       method: 'POST',
-      body: { email: 'joe@joeuniverse.com' },
+      body: { email: 'joe@example.com' },
     });
     expect(((await testRule.json()) as { data: { allowed: boolean } }).data.allowed).toBe(true);
 
@@ -154,8 +170,8 @@ describe('JoeAuth End-to-End Workers Flow', () => {
     const okReg = await req('/api/auth/register', userJar, {
       method: 'POST',
       body: {
-        name: 'Joe Dev',
-        email: 'joe@joeuniverse.com',
+        name: 'Joe Doe',
+        email: 'joe@example.com',
         password: 'StrongPassword123',
         turnstileToken: 'test-token',
       },
@@ -168,9 +184,9 @@ describe('JoeAuth End-to-End Workers Flow', () => {
     const deniedAppCreate = await req('/api/dev/apps', userJar, {
       method: 'POST',
       body: {
-        name: 'JoeDrive',
-        homepageUrl: 'https://drive.joeuniverse.com',
-        redirectUris: ['https://drive.joeuniverse.com/callback'],
+        name: 'Example Drive',
+        homepageUrl: 'https://drive.example.com',
+        redirectUris: ['https://drive.example.com/callback'],
       },
     });
     expect(deniedAppCreate.status).toBe(403);
@@ -179,7 +195,7 @@ describe('JoeAuth End-to-End Workers Flow', () => {
     const devApply = await req('/api/dev/apply', userJar, {
       method: 'POST',
       body: {
-        reason: 'Building cloud storage for Joe Universe',
+        reason: 'Building cloud storage for Example App',
         turnstileToken: 'test-token',
       },
     });
@@ -192,7 +208,7 @@ describe('JoeAuth End-to-End Workers Flow', () => {
       method: 'POST',
       body: {
         name: 'Helper Admin',
-        email: 'helper@joeuniverse.com',
+        email: 'helper@example.com',
         password: 'StrongPassword123',
         turnstileToken: 'test-token',
       },
@@ -223,17 +239,79 @@ describe('JoeAuth End-to-End Workers Flow', () => {
     const createApp = await req('/api/dev/apps', userJar, {
       method: 'POST',
       body: {
-        name: 'JoeDrive',
-        homepageUrl: 'https://drive.joeuniverse.com',
-        redirectUris: ['https://drive.joeuniverse.com/callback'],
+        name: 'Example Drive',
+        description: 'Encrypted cloud storage for Example App',
+        privilegeDescription: 'Displays your profile picture and email in Example Drive.',
+        homepageUrl: 'https://drive.example.com',
+        redirectUris: ['https://drive.example.com/callback'],
         allowedScopes: ['openid', 'profile', 'email', 'offline_access'],
       },
     });
     expect(createApp.status).toBe(201);
     const appData = (await createApp.json()) as {
-      data: { client_id: string; client_secret: string; status: string };
+      data: { id: string; client_id: string; client_secret: string; status: string };
     };
     expect(appData.data.status).toBe('approved');
+
+    // 6b. Profile picture & App logo validation, R2 upload, media serving & deletion
+    const meBeforeAvatar = (await (await req('/api/user/me', userJar)).json()) as {
+      data: { id: string; avatar_color: string; avatar_url: string; has_custom_avatar: boolean };
+    };
+    expect(meBeforeAvatar.data.avatar_color).toMatch(/^#[0-9a-f]{6}$/);
+    expect(meBeforeAvatar.data.has_custom_avatar).toBe(false);
+
+    const defaultAvatarResp = await SELF.fetch(`http://localhost${meBeforeAvatar.data.avatar_url}`);
+    expect(defaultAvatarResp.status).toBe(200);
+    expect(defaultAvatarResp.headers.get('content-type')).toContain('image/svg+xml');
+    expect(defaultAvatarResp.headers.get('cross-origin-resource-policy')).toBe('cross-origin');
+    expect(await defaultAvatarResp.text()).toContain(meBeforeAvatar.data.avatar_color);
+
+    const badDimAvatar = await req('/api/user/avatar', userJar, {
+      method: 'POST',
+      rawBody: makeTestPng(128, 128, 64),
+      headers: { 'Content-Type': 'image/png' },
+    });
+    expect(badDimAvatar.status).toBe(400);
+
+    const oversizedAvatar = await req('/api/user/avatar', userJar, {
+      method: 'POST',
+      rawBody: makeTestPng(256, 256, 131073),
+      headers: { 'Content-Type': 'image/png' },
+    });
+    expect(oversizedAvatar.status).toBe(400);
+
+    const validAvatarPng = makeTestPng(256, 256, 128);
+    const uploadAvatar = await req('/api/user/avatar', userJar, {
+      method: 'POST',
+      rawBody: validAvatarPng,
+      headers: { 'Content-Type': 'image/png' },
+    });
+    expect(uploadAvatar.status).toBe(200);
+    const avatarJson = (await uploadAvatar.json()) as {
+      data: { avatar_url: string; has_custom_avatar: boolean };
+    };
+    expect(avatarJson.data.has_custom_avatar).toBe(true);
+
+    const customAvatarResp = await SELF.fetch(`http://localhost${avatarJson.data.avatar_url}`);
+    expect(customAvatarResp.status).toBe(200);
+    expect(customAvatarResp.headers.get('content-type')).toBe('image/png');
+    expect((await customAvatarResp.arrayBuffer()).byteLength).toBe(128);
+
+    const defaultAppLogoResp = await SELF.fetch(`http://localhost/media/app-logos/${appData.data.id}`);
+    expect(defaultAppLogoResp.status).toBe(404);
+
+    const uploadLogo = await req(`/api/dev/apps/${appData.data.id}/logo`, userJar, {
+      method: 'POST',
+      rawBody: makeTestPng(256, 256, 96),
+      headers: { 'Content-Type': 'image/png' },
+    });
+    expect(uploadLogo.status).toBe(200);
+    const logoJson = (await uploadLogo.json()) as { data: { logo_url: string; has_custom_logo: boolean } };
+    expect(logoJson.data.has_custom_logo).toBe(true);
+
+    const customLogoResp = await SELF.fetch(`http://localhost${logoJson.data.logo_url}`);
+    expect(customLogoResp.status).toBe(200);
+    expect(customLogoResp.headers.get('content-type')).toBe('image/png');
 
     // 7. Full OAuth 2.0 + PKCE S256 Account Chooser, Consent & Token Flow
     const codeVerifier = 'test_pkce_verifier_string_with_sufficient_entropy_12345';
@@ -241,7 +319,7 @@ describe('JoeAuth End-to-End Workers Flow', () => {
 
     const chooserResp = await req(
       `/oauth/authorize?client_id=${encodeURIComponent(appData.data.client_id)}&redirect_uri=${encodeURIComponent(
-        'https://drive.joeuniverse.com/callback'
+        'https://drive.example.com/callback'
       )}&response_type=code&scope=${encodeURIComponent('openid profile email offline_access')}&state=xyz&code_challenge=${encodeURIComponent(
         codeChallenge
       )}&code_challenge_method=S256&nonce=n1`,
@@ -249,8 +327,8 @@ describe('JoeAuth End-to-End Workers Flow', () => {
     );
     expect(chooserResp.status).toBe(200);
     const chooserHtml = await chooserResp.text();
-    expect(chooserHtml).toContain('Continue to JoeDrive');
-    expect(chooserHtml).toContain('joe@joeuniverse.com');
+    expect(chooserHtml).toContain('Continue to Example Drive');
+    expect(chooserHtml).toContain('joe@example.com');
     expect(chooserHtml).toContain('Use another account');
     expect(chooserHtml).toContain('Create account');
 
@@ -265,7 +343,7 @@ describe('JoeAuth End-to-End Workers Flow', () => {
       _csrf: userJar.csrf(),
       sessionId: joeSessionId,
       client_id: appData.data.client_id,
-      redirect_uri: 'https://drive.joeuniverse.com/callback',
+      redirect_uri: 'https://drive.example.com/callback',
       response_type: 'code',
       scope: 'openid profile email offline_access',
       state: 'xyz',
@@ -278,7 +356,7 @@ describe('JoeAuth End-to-End Workers Flow', () => {
     const selectedPath = selectAccountResp.headers.get('location')!;
     expect(selectedPath).toContain('selected=1');
 
-    // Verify Referrer-Policy prevents Origin: null mangling, and CSRF origin rules allow same-origin null while blocking cross-site
+    // Verify Referrer-Policy prevents Origin: null mangling, and CSRF origin rules allow same-origin null while blocking cross-site / missing header
     expect(chooserResp.headers.get('referrer-policy')).toBe('same-origin');
     const crossOriginPost = await req('/oauth/select-account', userJar, {
       method: 'POST',
@@ -286,6 +364,12 @@ describe('JoeAuth End-to-End Workers Flow', () => {
       headers: { Origin: 'https://evil.example' },
     });
     expect(crossOriginPost.status).toBe(403);
+    const missingSecFetchNullPost = await req('/oauth/select-account', userJar, {
+      method: 'POST',
+      form: selectAccountForm,
+      headers: { Origin: 'null' },
+    });
+    expect(missingSecFetchNullPost.status).toBe(403);
     const sameOriginNullPost = await req('/oauth/select-account', userJar, {
       method: 'POST',
       form: selectAccountForm,
@@ -301,12 +385,17 @@ describe('JoeAuth End-to-End Workers Flow', () => {
 
     const authGet = await req(selectedPath, userJar);
     expect(authGet.status).toBe(200);
-    expect(await authGet.text()).toContain('JoeDrive wants access');
+    const consentHtml = await authGet.text();
+    expect(consentHtml).toContain('Example Drive wants access');
+    expect(consentHtml).toContain('Encrypted cloud storage for Example App');
+    expect(consentHtml).toContain('Displays your profile picture and email in Example Drive.');
+    expect(consentHtml).toContain(`/media/app-logos/${appData.data.id}`);
+    expect(consentHtml).toContain(`/media/avatars/${meBeforeAvatar.data.id}`);
 
     const consentForm = new URLSearchParams({
       _csrf: userJar.csrf(),
       client_id: appData.data.client_id,
-      redirect_uri: 'https://drive.joeuniverse.com/callback',
+      redirect_uri: 'https://drive.example.com/callback',
       response_type: 'code',
       scope: 'openid profile email offline_access',
       state: 'xyz',
@@ -332,7 +421,7 @@ describe('JoeAuth End-to-End Workers Flow', () => {
         client_id: appData.data.client_id,
         client_secret: appData.data.client_secret,
         code,
-        redirect_uri: 'https://drive.joeuniverse.com/callback',
+        redirect_uri: 'https://drive.example.com/callback',
         code_verifier: codeVerifier,
       }).toString(),
     });
@@ -343,18 +432,20 @@ describe('JoeAuth End-to-End Workers Flow', () => {
       refresh_token: string;
     };
 
-    // Verify Ed25519 JWT signature
+    // Verify Ed25519 JWT signature & OIDC picture claim
     const verifiedClaims = await verifyEd25519Jwt(tokens.id_token, testEnv.JWT_PUBLIC_JWK!);
-    expect(verifiedClaims?.email).toBe('joe@joeuniverse.com');
+    expect(verifiedClaims?.email).toBe('joe@example.com');
     expect(verifiedClaims?.nonce).toBe('n1');
+    expect(String(verifiedClaims?.picture || '')).toContain(`/media/avatars/${meBeforeAvatar.data.id}`);
 
     // UserInfo endpoint
     const uiResp = await SELF.fetch('http://localhost/api/oauth/userinfo', {
       headers: { Authorization: `Bearer ${tokens.access_token}` },
     });
     expect(uiResp.status).toBe(200);
-    const ui = (await uiResp.json()) as { email: string; name: string };
-    expect(ui.email).toBe('joe@joeuniverse.com');
+    const ui = (await uiResp.json()) as { email: string; name: string; picture?: string };
+    expect(ui.email).toBe('joe@example.com');
+    expect(ui.picture).toContain(`/media/avatars/${meBeforeAvatar.data.id}`);
 
     // Introspect endpoint
     const introResp = await SELF.fetch('http://localhost/api/oauth/introspect', {
@@ -366,9 +457,21 @@ describe('JoeAuth End-to-End Workers Flow', () => {
         token: tokens.access_token,
       }).toString(),
     });
-    const intro = (await introResp.json()) as { active: boolean; user: { email: string } };
+    const intro = (await introResp.json()) as { active: boolean; user: { email: string; picture?: string } };
     expect(intro.active).toBe(true);
-    expect(intro.user.email).toBe('joe@joeuniverse.com');
+    expect(intro.user.email).toBe('joe@example.com');
+    expect(intro.user.picture).toContain(`/media/avatars/${meBeforeAvatar.data.id}`);
+
+    // Deleting avatar & app logo restores default fallbacks
+    const delAvatar = await req('/api/user/avatar', userJar, { method: 'DELETE', body: {} });
+    expect(delAvatar.status).toBe(200);
+    const revertedAvatarResp = await SELF.fetch(`http://localhost/media/avatars/${meBeforeAvatar.data.id}`);
+    expect(revertedAvatarResp.status).toBe(200);
+    expect(revertedAvatarResp.headers.get('content-type')).toContain('image/svg+xml');
+
+    const delLogo = await req(`/api/dev/apps/${appData.data.id}/logo`, userJar, { method: 'DELETE', body: {} });
+    expect(delLogo.status).toBe(200);
+    expect((await SELF.fetch(`http://localhost/media/app-logos/${appData.data.id}`)).status).toBe(404);
 
     // Refresh token rotation & reuse detection
     const refresh1 = await SELF.fetch('http://localhost/api/oauth/token', {
@@ -445,13 +548,79 @@ describe('JoeAuth End-to-End Workers Flow', () => {
     expect(totpData.data.qrDataUrl.startsWith('data:image/svg+xml;utf8,')).toBe(true);
     expect(decodeURIComponent(totpData.data.qrDataUrl)).toContain('<svg');
 
+    // 8a-bis. Security regressions: scope escalation on POST /oauth/authorize & open redirect sanitization
+    const restrictedAppResp = await req('/api/dev/apps', userJar, {
+      method: 'POST',
+      body: {
+        name: 'Restricted App',
+        homepageUrl: 'https://app.example.com',
+        redirectUris: ['https://app.example.com/callback'],
+        allowedScopes: ['openid'],
+      },
+    });
+    expect(restrictedAppResp.status).toBe(201);
+    const restrictedApp = (await restrictedAppResp.json()) as {
+      data: { id: string; client_id: string; client_secret: string };
+    };
+
+    const tamperedConsentResp = await req('/oauth/authorize', userJar, {
+      method: 'POST',
+      form: new URLSearchParams({
+        _csrf: userJar.csrf(),
+        decision: 'allow',
+        client_id: restrictedApp.data.client_id,
+        redirect_uri: 'https://app.example.com/callback',
+        scope: 'openid profile email offline_access',
+        state: 'esc_state',
+        code_challenge: codeChallenge,
+        code_challenge_method: 'S256',
+      }),
+    });
+    expect(tamperedConsentResp.status).toBe(302);
+    const tamperedRedirect = new URL(tamperedConsentResp.headers.get('location')!);
+    const restrictedCode = tamperedRedirect.searchParams.get('code')!;
+    expect(restrictedCode).toBeTruthy();
+
+    const restrictedTokenResp = await SELF.fetch('http://localhost/api/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: restrictedCode,
+        client_id: restrictedApp.data.client_id,
+        client_secret: restrictedApp.data.client_secret,
+        redirect_uri: 'https://app.example.com/callback',
+        code_verifier: codeVerifier,
+      }).toString(),
+    });
+    expect(restrictedTokenResp.status).toBe(200);
+    const restrictedTokens = (await restrictedTokenResp.json()) as {
+      scope: string;
+      refresh_token?: string;
+    };
+    expect(restrictedTokens.scope).toBe('openid');
+    expect(restrictedTokens.refresh_token).toBeUndefined();
+
+    // Ensure unsafe return_to URLs are neutralized in SSR
+    const openRedirectLogin = await req('/login?mode=add&return_to=https://evil.example/phish', userJar);
+    expect(openRedirectLogin.status).toBe(200);
+    const openRedirectHtml = await openRedirectLogin.text();
+    expect(openRedirectHtml).toContain('data-return-to="/account"');
+    expect(openRedirectHtml).not.toContain('https://evil.example/phish');
+
+    const protoRelRedirect = await req('/register?return_to=//evil.example/phish', userJar);
+    expect(protoRelRedirect.status).toBe(200);
+    const protoRelHtml = await protoRelRedirect.text();
+    expect(protoRelHtml).toContain('data-return-to="/account"');
+    expect(protoRelHtml).not.toContain('//evil.example/phish');
+
     // 8b. Multi-token / multi-account chooser & session switching on same browser
     // /login with 1 signed-in account still renders Account Chooser with login/register options
     const loginChooser = await req('/login', userJar);
     expect(loginChooser.status).toBe(200);
     const loginChooserHtml = await loginChooser.text();
     expect(loginChooserHtml).toContain('Choose an account');
-    expect(loginChooserHtml).toContain('joe@joeuniverse.com');
+    expect(loginChooserHtml).toContain('joe@example.com');
     expect(loginChooserHtml).toContain('Use another account');
     expect(loginChooserHtml).toContain('Create account');
 
@@ -459,29 +628,97 @@ describe('JoeAuth End-to-End Workers Flow', () => {
     expect((await req('/login?mode=add', userJar)).status).toBe(200);
     expect((await req('/register', userJar)).status).toBe(200);
 
+    // Single account stays on clean /account URL without forcing /u/0
+    const singleAccountPage = await req('/account', userJar);
+    expect(singleAccountPage.status).toBe(200);
+    expect(await singleAccountPage.text()).toContain('<meta name="account-base" content=""');
+
     // Sign up a 2nd account into the same browser jar -> both accounts co-exist
-    const aliceReg = await req('/api/auth/register', userJar, {
+    const alexReg = await req('/api/auth/register', userJar, {
       method: 'POST',
       body: {
-        name: 'Alice Dev',
-        email: 'alice@joeuniverse.com',
+        name: 'Alex Doe',
+        email: 'alex@example.com',
         password: 'StrongPassword123',
         turnstileToken: 'test-token',
       },
     });
-    expect(aliceReg.status).toBe(201);
+    expect(alexReg.status).toBe(201);
+    const alexJson = (await alexReg.json()) as {
+      data: { slot: string; userCount: number; user: { id: string } };
+    };
+    const alexUserId = alexJson.data.user.id;
+    expect(alexJson.data.slot).toBe('1');
+    expect(alexJson.data.userCount).toBe(2);
+
+    // Multi-account bare /account redirects to /u/<slot>/account (Google-style)
+    const bareAccountMulti = await req('/account', userJar);
+    expect(bareAccountMulti.status).toBe(302);
+    expect(bareAccountMulti.headers.get('location')).toBe('/u/1/account');
+
+    // Simultaneous /u/0 and /u/1 work independently on the same CookieJar without switching global cookie
+    const u0Page = await req('/u/0/account', userJar);
+    expect(u0Page.status).toBe(200);
+    const u0Html = await u0Page.text();
+    expect(u0Html).toContain('<meta name="account-base" content="/u/0"');
+    expect(u0Html).toContain('href="/u/0/developer"');
+
+    const u0Me = await req('/u/0/api/user/me', userJar);
+    expect(((await u0Me.json()) as { data: { email: string } }).data.email).toBe('joe@example.com');
+
+    const u1Me = await req('/u/1/api/user/me', userJar);
+    expect(((await u1Me.json()) as { data: { email: string } }).data.email).toBe('alex@example.com');
+
+    // Superuser co-exists under special /u/superuser slot without disturbing u/0 or u/1
+    const multiSuLogin = await req('/api/admin/superuser/login', userJar, {
+      method: 'POST',
+      body: { password: 'test-superuser-pass', turnstileToken: 'test-token' },
+    });
+    expect(multiSuLogin.status).toBe(200);
+    expect(((await multiSuLogin.json()) as { data: { slot: string } }).data.slot).toBe('superuser');
+
+    // Re-read /u/0 and /u/1 and /u/superuser simultaneously
+    expect(((await (await req('/u/0/api/user/me', userJar)).json()) as { data: { email: string } }).data.email).toBe(
+      'joe@example.com'
+    );
+    expect(((await (await req('/u/1/api/user/me', userJar)).json()) as { data: { email: string } }).data.email).toBe(
+      'alex@example.com'
+    );
+    const suAdminPage = await req('/u/superuser/admin', userJar);
+    expect(suAdminPage.status).toBe(200);
+    expect(await suAdminPage.text()).toContain('<meta name="account-base" content="/u/superuser"');
+    expect((await req('/u/superuser/api/admin/overview', userJar)).status).toBe(200);
+    // Slot isolation: regular user slot u/0 cannot access /admin even though superuser is signed in
+    expect((await req('/u/0/admin', userJar)).status).toBe(302);
 
     const accountsResp = await req('/api/auth/accounts', userJar);
     expect(accountsResp.status).toBe(200);
     const accountsJson = (await accountsResp.json()) as {
-      data: { accounts: Array<{ sessionId: string; isActive: boolean; user: { email: string } | null }> };
+      data: {
+        accounts: Array<{ sessionId: string; slot: string; isActive: boolean; isSuperuser: boolean; user: { email: string } | null }>;
+      };
     };
-    expect(accountsJson.data.accounts.length).toBe(2);
-    const joeEntry = accountsJson.data.accounts.find((a) => a.user?.email === 'joe@joeuniverse.com')!;
-    const aliceEntry = accountsJson.data.accounts.find((a) => a.user?.email === 'alice@joeuniverse.com')!;
-    expect(joeEntry).toBeTruthy();
-    expect(aliceEntry).toBeTruthy();
-    expect(aliceEntry.isActive).toBe(true);
+    expect(accountsJson.data.accounts.length).toBe(3);
+    const joeEntry = accountsJson.data.accounts.find((a) => a.user?.email === 'joe@example.com')!;
+    const alexEntry = accountsJson.data.accounts.find((a) => a.user?.email === 'alex@example.com')!;
+    expect(joeEntry.slot).toBe('0');
+    expect(alexEntry.slot).toBe('1');
+
+    // Switch back to Joe on bare cookie & verify client header spoofing x-joe-slot is rejected
+    const goodSwitch = await req('/api/auth/switch', userJar, {
+      method: 'POST',
+      body: { sessionId: joeEntry.sessionId },
+    });
+    expect(goodSwitch.status).toBe(200);
+    const spoofedSlotResp = await req('/api/admin/overview', userJar, {
+      headers: { 'x-joe-slot': 'superuser' },
+    });
+    expect(spoofedSlotResp.status).toBe(403);
+
+    // Log out ONLY the superuser slot via /u/superuser/api/auth/logout; Joe & Alex remain signed in
+    const suSlotLogout = await req('/u/superuser/api/auth/logout', userJar, { method: 'POST', body: {} });
+    expect(suSlotLogout.status).toBe(200);
+    expect((await req('/u/superuser/api/admin/overview', userJar)).status).toBe(401);
 
     // Reject switching to an unknown/foreign sessionId
     const badSwitch = await req('/api/auth/switch', userJar, {
@@ -490,22 +727,16 @@ describe('JoeAuth End-to-End Workers Flow', () => {
     });
     expect(badSwitch.status).toBe(403);
 
-    // Switch back to Joe
-    const goodSwitch = await req('/api/auth/switch', userJar, {
-      method: 'POST',
-      body: { sessionId: joeEntry.sessionId },
-    });
-    expect(goodSwitch.status).toBe(200);
-
     const switchedMe = await req('/api/user/me', userJar);
-    expect(((await switchedMe.json()) as { data: { email: string } }).data.email).toBe('joe@joeuniverse.com');
+    expect(((await switchedMe.json()) as { data: { email: string } }).data.email).toBe('joe@example.com');
 
-    // Sign out only Alice -> Joe stays active
-    const logoutAlice = await req('/api/auth/logout', userJar, {
+    // Sign out only Alex -> Joe stays active & bare /account returns 200 again for single account
+    const logoutAlex = await req('/api/auth/logout', userJar, {
       method: 'POST',
-      body: { sessionId: aliceEntry.sessionId },
+      body: { sessionId: alexEntry.sessionId },
     });
-    expect(logoutAlice.status).toBe(200);
+    expect(logoutAlex.status).toBe(200);
+    expect((await req('/account', userJar)).status).toBe(200);
 
     const remainingAccounts = (
       (await (await req('/api/auth/accounts', userJar)).json()) as {
@@ -513,7 +744,7 @@ describe('JoeAuth End-to-End Workers Flow', () => {
       }
     ).data.accounts;
     expect(remainingAccounts.length).toBe(1);
-    expect(remainingAccounts[0].user?.email).toBe('joe@joeuniverse.com');
+    expect(remainingAccounts[0].user?.email).toBe('joe@example.com');
 
     // Sign out all clears remaining sessions
     const logoutAll = await req('/api/auth/logout', userJar, {
@@ -525,6 +756,125 @@ describe('JoeAuth End-to-End Workers Flow', () => {
       (await (await req('/api/auth/accounts', userJar)).json()) as { data: { accounts: unknown[] } }
     ).data.accounts;
     expect(emptyAccounts.length).toBe(0);
+
+    // 8c. Admin Panel versatile user management, self-protection guards, app deletion & log/maintenance purges
+    // Admin page renders with current user id for self-protection UI
+    const adminPageResp = await req('/admin', adminJar);
+    expect(adminPageResp.status).toBe(200);
+    const adminPageHtml = await adminPageResp.text();
+    expect(adminPageHtml).toContain(`data-current-user-id="${helperId}"`);
+
+    // Helper Admin CANNOT suspend or delete their own active account
+    const selfSuspend = await req(`/api/admin/users/${helperId}/status`, adminJar, {
+      method: 'PATCH',
+      body: { status: 'suspended' },
+    });
+    expect(selfSuspend.status).toBe(400);
+
+    const selfDelete = await req(`/api/admin/users/${helperId}`, adminJar, {
+      method: 'DELETE',
+      body: {},
+    });
+    expect(selfDelete.status).toBe(400);
+
+    // Grant & revoke developer privilege via admin API
+    const grantDev = await req(`/api/admin/users/${alexUserId}/developer-status`, adminJar, {
+      method: 'PATCH',
+      body: { developerStatus: 'approved' },
+    });
+    expect(grantDev.status).toBe(200);
+    const revokeDev = await req(`/api/admin/users/${alexUserId}/developer-status`, adminJar, {
+      method: 'PATCH',
+      body: { developerStatus: 'revoked' },
+    });
+    expect(revokeDev.status).toBe(200);
+
+    // Admin sets Alex's password -> old password fails (creates login_failed audit log), new password works
+    const setPwd = await req(`/api/admin/users/${alexUserId}/password`, adminJar, {
+      method: 'POST',
+      body: { newPassword: 'BrandNewPassword456' },
+    });
+    expect(setPwd.status).toBe(200);
+
+    const alexLoginJar = new CookieJar();
+    const badLogin = await req('/api/auth/login', alexLoginJar, {
+      method: 'POST',
+      body: { email: 'alex@example.com', password: 'StrongPassword123', turnstileToken: 'test-token' },
+    });
+    expect(badLogin.status).toBe(401);
+
+    const okNewPwdLogin = await req('/api/auth/login', alexLoginJar, {
+      method: 'POST',
+      body: { email: 'alex@example.com', password: 'BrandNewPassword456', turnstileToken: 'test-token' },
+    });
+    expect(okNewPwdLogin.status).toBe(200);
+
+    // Admin revokes Alex's sessions -> Alex session invalidated
+    const revokeAlexSessions = await req(`/api/admin/users/${alexUserId}/revoke-sessions`, adminJar, {
+      method: 'POST',
+      body: {},
+    });
+    expect(revokeAlexSessions.status).toBe(200);
+    expect((await req('/api/user/me', alexLoginJar)).status).toBe(401);
+
+    // Admin resets 2FA & deletes Alex's account
+    const reset2fa = await req(`/api/admin/users/${alexUserId}/2fa`, adminJar, {
+      method: 'DELETE',
+      body: {},
+    });
+    expect(reset2fa.status).toBe(200);
+
+    const deleteAlex = await req(`/api/admin/users/${alexUserId}`, adminJar, {
+      method: 'DELETE',
+      body: {},
+    });
+    expect(deleteAlex.status).toBe(200);
+
+    const deletedLookup = await req('/api/admin/users?q=alex@example.com', adminJar);
+    expect(((await deletedLookup.json()) as { data: unknown[] }).data.length).toBe(0);
+
+    // Admin can delete OAuth apps directly
+    const adminDelApp = await req(`/api/admin/apps/${restrictedApp.data.id}`, adminJar, {
+      method: 'DELETE',
+      body: {},
+    });
+    expect(adminDelApp.status).toBe(200);
+
+    // Audit log category filter & categorized log purge + maintenance purge
+    const failureLogsBefore = (
+      (await (await req('/api/admin/audit-logs?category=auth_failures', adminJar)).json()) as {
+        data: unknown[];
+      }
+    ).data;
+    expect(failureLogsBefore.length).toBeGreaterThan(0);
+
+    const purgeFailures = await req('/api/admin/audit-logs/purge', adminJar, {
+      method: 'POST',
+      body: { category: 'auth_failures' },
+    });
+    expect(purgeFailures.status).toBe(200);
+    expect(((await purgeFailures.json()) as { data: { deleted: number } }).data.deleted).toBeGreaterThan(0);
+
+    const failureLogsAfter = (
+      (await (await req('/api/admin/audit-logs?category=auth_failures', adminJar)).json()) as {
+        data: unknown[];
+      }
+    ).data;
+    expect(failureLogsAfter.length).toBe(0);
+
+    const maintPurge = await req('/api/admin/maintenance/purge', adminJar, {
+      method: 'POST',
+      body: { target: 'all_stale' },
+    });
+    expect(maintPurge.status).toBe(200);
+
+    const overviewAfter = (
+      (await (await req('/api/admin/overview', adminJar)).json()) as {
+        data: { maintenance: { auditLogsTotal: number; authFailureLogs: number } };
+      }
+    ).data;
+    expect(overviewAfter.maintenance.authFailureLogs).toBe(0);
+    expect(overviewAfter.maintenance.auditLogsTotal).toBeGreaterThan(0);
 
     // 9. Root redirects to /login when unauthenticated; auth & doc pages render cleanly
     const rootResp = await SELF.fetch('http://localhost/', { redirect: 'manual' });

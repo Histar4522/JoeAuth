@@ -215,6 +215,13 @@ function renderHtml() {
             <span id="resp-status" class="badge hidden"></span>
           </div>
         </div>
+        <div id="resp-picture-bar" class="d-flex align-items-center gap-3 p-2 rounded bg-body-tertiary border mt-3 hidden">
+          <img id="resp-picture-img" src="" alt="OIDC picture claim preview" width="48" height="48" class="rounded-circle border object-fit-cover flex-shrink-0">
+          <div class="small min-w-0">
+            <div class="fw-semibold" id="resp-picture-name">Profile Picture Claim</div>
+            <div class="text-body-secondary text-break font-monospace" id="resp-picture-url"></div>
+          </div>
+        </div>
         <pre id="resp-out" class="resp-pre">Click any test button above to inspect the response.</pre>
       </div>
     </div>
@@ -288,6 +295,20 @@ function renderHtml() {
           respStatus.className = 'badge hidden';
         }
         respOut.textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+        const picBar = document.getElementById('resp-picture-bar');
+        const picUrl =
+          data && typeof data === 'object'
+            ? (data.picture || data.user?.picture || data.payload?.picture || '')
+            : '';
+        if (picBar && typeof picUrl === 'string' && picUrl) {
+          document.getElementById('resp-picture-img').src = picUrl;
+          document.getElementById('resp-picture-name').textContent =
+            data.name || data.user?.name || data.payload?.name || 'OIDC picture claim';
+          document.getElementById('resp-picture-url').textContent = picUrl;
+          picBar.classList.remove('hidden');
+        } else if (picBar) {
+          picBar.classList.add('hidden');
+        }
       }
 
       function applyTokenBundle(bundle) {

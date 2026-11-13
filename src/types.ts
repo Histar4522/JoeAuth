@@ -2,6 +2,7 @@ export interface Bindings extends Omit<
   CloudflareBindings,
   'APP_NAME' | 'ISSUER_URL' | 'EMAIL_FROM' | 'TURNSTILE_SITE_KEY' | 'REQUIRE_EMAIL_VERIFICATION'
 > {
+  MEDIA_BUCKET: R2Bucket;
   APP_NAME: string;
   ISSUER_URL: string;
   EMAIL_FROM: string;
@@ -30,6 +31,9 @@ export interface UserRow {
   email_verified: number;
   totp_secret: string | null;
   totp_enabled: number;
+  avatar_key: string | null;
+  avatar_color: string;
+  avatar_version: number;
   created_at: number;
   updated_at: number;
 }
@@ -63,12 +67,15 @@ export interface AppRow {
   owner_user_id: string;
   name: string;
   description: string;
+  privilege_description: string;
   homepage_url: string;
   client_id: string;
   client_secret_hash: string;
   client_secret_prefix: string;
   redirect_uris: string;
   allowed_scopes: string;
+  logo_key: string | null;
+  logo_version: number;
   is_first_party: number;
   status: 'approved' | 'suspended';
   created_at: number;
@@ -88,6 +95,7 @@ export interface RegistrationRuleRow {
 
 export interface ResolvedAccountSession {
   sessionId: string;
+  slot: string;
   isSuperuser: boolean;
   user: UserRow | null;
   lastSeenAt: number;
@@ -95,6 +103,8 @@ export interface ResolvedAccountSession {
 
 export interface AuthContext {
   sessionId: string;
+  slot: string | null;
+  basePath: string;
   isSuperuser: boolean;
   user: UserRow | null;
   accounts: ResolvedAccountSession[];

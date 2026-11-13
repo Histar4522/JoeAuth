@@ -8,7 +8,7 @@ export const DocsPage: FC<{
   auth: AuthContext | null;
   csrfToken: string;
 }> = ({ appName, issuer, auth, csrfToken }) => {
-  const cfWorkerVerifySnippet = `// Verify Ed25519 access_token or id_token on any Cloudflare Worker (zero dependencies)
+  const cfWorkerVerifySnippet = `// Verify Ed25519 access_token or id_token using Web Crypto API (zero dependencies)
 const jwksResp = await fetch('${issuer}/.well-known/jwks.json');
 const { keys } = await jwksResp.json();
 const pubKey = await crypto.subtle.importKey('jwk', keys[0], { name: 'Ed25519' }, false, ['verify']);
@@ -31,7 +31,7 @@ const resp = await fetch('${issuer}/api/oauth/token', {
     client_id: 'YOUR_CLIENT_ID',
     client_secret: 'YOUR_CLIENT_SECRET', // Required if PKCE was not used
     code: callbackCode,
-    redirect_uri: 'https://your-service.example/callback',
+    redirect_uri: 'https://app.example.com/callback',
     code_verifier: pkceVerifier,         // Required if code_challenge was sent
   }),
 });
@@ -109,7 +109,7 @@ claims = jwt.decode(
           </ol>
           <p class="text-body-secondary small mb-0">
             <strong>Supported Scopes:</strong> <code>openid</code> (user ID <code>sub</code> &amp; <code>id_token</code>),{' '}
-            <code>profile</code> (<code>name</code>, <code>role</code>, <code>developer_status</code>),{' '}
+            <code>profile</code> (<code>name</code>, <code>picture</code>, <code>role</code>, <code>developer_status</code>),{' '}
             <code>email</code> (<code>email</code>, <code>email_verified</code>),{' '}
             <code>offline_access</code> (issues rotating 30-day <code>refresh_token</code>).
           </p>
@@ -129,7 +129,7 @@ claims = jwt.decode(
               <input class="form-control" type="text" id="doc-client-id" placeholder="client_id (e.g. ja_...)" />
             </div>
             <div class="col-md-4">
-              <input class="form-control" type="url" id="doc-redirect-uri" placeholder="https://your-service.example/callback" />
+              <input class="form-control" type="url" id="doc-redirect-uri" placeholder="https://app.example.com/callback" />
             </div>
             <div class="col-md-3">
               <input class="form-control" type="text" id="doc-scope" value="openid profile email offline_access" />
@@ -184,7 +184,7 @@ claims = jwt.decode(
 
           <hr />
           <h3 class="h6 fw-semibold"><code>GET /.well-known/jwks.json</code></h3>
-          <p class="small mb-1"><strong>Auth:</strong> Public · <strong>Cache:</strong> <code>public, max-age=300</code> (edge KV-cached)</p>
+          <p class="small mb-1"><strong>Auth:</strong> Public · <strong>Cache:</strong> <code>public, max-age=300</code> (cached)</p>
           <p class="small text-body-secondary">
             <strong>Behavior:</strong> Exposes the active Ed25519 public key(s) in JSON Web Key Set format so client services
             can verify <code>access_token</code> and <code>id_token</code> signatures locally with zero network calls per request.
@@ -291,11 +291,12 @@ claims = jwt.decode(
           <pre class="code-block mb-3">{`200 OK
 {
   "sub": "user-uuid",
-  "name": "Joe Explorer",          // if scope includes 'profile'
-  "role": "user",                  // if scope includes 'profile' ('user' | 'admin')
-  "developer_status": "approved",  // if scope includes 'profile'
-  "email": "joe@example.com",      // if scope includes 'email'
-  "email_verified": true           // if scope includes 'email'
+  "name": "Joe Doe",                               // if scope includes 'profile'
+  "picture": "${issuer}/media/avatars/user-uuid",   // if scope includes 'profile' (256x256 PNG or initial SVG)
+  "role": "user",                                  // if scope includes 'profile' ('user' | 'admin')
+  "developer_status": "approved",                  // if scope includes 'profile'
+  "email": "joe@example.com",                      // if scope includes 'email'
+  "email_verified": true                           // if scope includes 'email'
 }
 
 401 Unauthorized: { "error": "invalid_token" }`}</pre>
@@ -308,8 +309,8 @@ claims = jwt.decode(
           </p>
           <p class="small text-body-secondary">
             <strong>Behavior:</strong> RFC 7662 token introspection for backends that prefer server-side validation. Authenticates the
-            calling application (`401 invalid_client` if invalid), verifies the submitted <code>token</code>'s Ed25519 signature &amp;
-            expiration, and for user tokens verifies the user account is still <code>active</code> in D1. Always returns <code>200</code> with{' '}
+            calling application (<code>401 invalid_client</code> if invalid), verifies the submitted <code>token</code>'s Ed25519 signature &amp;
+            expiration, and for user tokens verifies the user account is still <code>active</code>. Always returns <code>200</code> with{' '}
             <code>{`{ "active": false }`}</code> for invalid, expired, or suspended-user tokens.
           </p>
           <pre class="code-block mb-3">{`200 OK (active user token)
@@ -327,7 +328,8 @@ claims = jwt.decode(
   "user": {
     "id": "user-uuid",
     "email": "joe@example.com",
-    "name": "Joe Explorer",
+    "name": "Joe Doe",
+    "picture": "${issuer}/media/avatars/user-uuid?v=1",
     "role": "user",
     "developer_status": "approved",
     "email_verified": true
@@ -341,7 +343,7 @@ claims = jwt.decode(
           <h3 class="h6 fw-semibold"><code>POST /api/oauth/revoke</code></h3>
           <p class="small mb-1"><strong>Rate Limit:</strong> 60 req / 60s · <strong>Body:</strong> <code>token=&lt;refresh_token&gt;</code></p>
           <p class="small text-body-secondary mb-0">
-            <strong>Behavior:</strong> Hashes the submitted <code>refresh_token</code> and marks it <code>revoked = 1</code> in D1.
+            <strong>Behavior:</strong> Marks the submitted <code>refresh_token</code> as revoked.
             Idempotent — always returns <code>200 {`{ "ok": true }`}</code> even if the token was already revoked or unknown.
           </p>
         </div>
@@ -366,7 +368,7 @@ claims = jwt.decode(
                 <tr>
                   <td>OIDC <code>id_token</code></td>
                   <td>3600s (1h)</td>
-                  <td><code>iss</code>, <code>sub</code>, <code>aud</code>, <code>nonce</code> (if given), <code>name</code>/<code>role</code>/<code>developer_status</code> (<code>profile</code>), <code>email</code>/<code>email_verified</code> (<code>email</code>), <code>iat</code>, <code>exp</code>, <code>jti</code></td>
+                  <td><code>iss</code>, <code>sub</code>, <code>aud</code>, <code>nonce</code> (if given), <code>name</code>/<code>picture</code>/<code>role</code>/<code>developer_status</code> (<code>profile</code>), <code>email</code>/<code>email_verified</code> (<code>email</code>), <code>iat</code>, <code>exp</code>, <code>jti</code></td>
                 </tr>
                 <tr>
                   <td>App <code>access_token</code> (<code>client_credentials</code>)</td>

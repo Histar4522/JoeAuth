@@ -1,16 +1,22 @@
 import type { FC } from 'hono/jsx';
 import type { AuthContext } from '../types';
+import { getAppLogoUrl } from '../lib/images';
 import { Layout } from './Layout';
+import { AppLogo, UserAvatar } from './components/Media';
 
 export interface ConsentPageProps {
   appName: string;
   auth: AuthContext;
   csrfToken: string;
   clientApp: {
+    id: string;
     name: string;
     description: string;
+    privilege_description: string;
     homepage_url: string;
     client_id: string;
+    logo_key: string | null;
+    logo_version: number;
   };
   scopes: string[];
   params: {
@@ -27,7 +33,7 @@ export interface ConsentPageProps {
 
 const SCOPE_LABELS: Record<string, string> = {
   openid: 'Verify your identity',
-  profile: 'Read your display name and role',
+  profile: 'Read your display name, profile picture, and role',
   email: 'Read your email address',
   offline_access: 'Keep you signed in',
 };
@@ -40,22 +46,42 @@ export const ConsentPage: FC<ConsentPageProps> = ({
   params,
 }) => {
   const user = auth.user!;
+  const logoUrl = clientApp.logo_key ? getAppLogoUrl('', clientApp.id, clientApp.logo_version) : null;
   return (
     <Layout title={`Authorize ${clientApp.name}`} auth={auth} csrfToken={csrfToken}>
       <div class="card shadow-sm auth-card">
         <div class="card-body p-4">
-          <h1 class="h4 fw-semibold mb-2">
-            <i class="bi bi-shield-check me-2 text-primary"></i>{clientApp.name} wants access
-          </h1>
-          <p class="text-body-secondary small mb-3">
-            Signed in as <strong>{user.email}</strong> ·{' '}
-            <a href={`/oauth/authorize?${new URLSearchParams(params).toString()}`}>
-              <i class="bi bi-people me-1"></i>Switch account
+          <div class="d-flex align-items-center gap-3 mb-3">
+            <AppLogo appName={clientApp.name} logoUrl={logoUrl} size={48} />
+            <div>
+              <h1 class="h4 fw-semibold mb-0">{clientApp.name} wants access</h1>
+              <div class="text-body-secondary small text-break">{clientApp.homepage_url}</div>
+            </div>
+          </div>
+
+          <div class="d-flex align-items-center justify-content-between gap-2 p-2 rounded bg-body-tertiary border mb-3">
+            <div class="d-flex align-items-center gap-2 min-w-0">
+              <UserAvatar user={user} size={30} />
+              <span class="small text-truncate">
+                Signed in as <strong>{user.email}</strong>
+              </span>
+            </div>
+            <a class="small text-nowrap" href={`/oauth/authorize?${new URLSearchParams(params).toString()}`}>
+              <i class="bi bi-people me-1"></i>Switch
             </a>
-          </p>
+          </div>
 
           {clientApp.description && (
             <p class="p-2 rounded bg-body-tertiary border small mb-3">{clientApp.description}</p>
+          )}
+
+          {clientApp.privilege_description && (
+            <div class="p-2 rounded bg-body-tertiary border small mb-3">
+              <div class="fw-semibold mb-1">
+                <i class="bi bi-info-circle text-primary me-1"></i>Why this app requests access
+              </div>
+              <div class="text-body-secondary">{clientApp.privilege_description}</div>
+            </div>
           )}
 
           <div class="border rounded bg-body-tertiary p-3 mb-3">

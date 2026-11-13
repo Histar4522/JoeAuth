@@ -36,12 +36,16 @@ export const Layout: FC<PropsWithChildren<LayoutProps>> = ({
   children,
 }) => {
   const isAdmin = Boolean(auth?.isSuperuser || auth?.user?.role === 'admin');
+  const base = auth?.basePath || '';
+  const hasSuperuserSession = Boolean(auth?.accounts?.some((a) => a.isSuperuser));
+  const adminHref = auth?.isSuperuser ? '/u/superuser/admin' : `${base}/admin`;
   return (
     <html lang="en" data-bs-theme="dark">
       <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <meta name="csrf-token" content={csrfToken} />
+        <meta name="account-base" content={base} />
         <title>{title}</title>
         <script src="/theme.js"></script>
         <link rel="stylesheet" href="/vendor/bootstrap.min.css" />
@@ -58,21 +62,26 @@ export const Layout: FC<PropsWithChildren<LayoutProps>> = ({
             <div class="container">
               <div class="navbar-nav flex-row flex-wrap gap-2">
                 {auth?.user && (
-                  <a class="nav-link px-2" href="/account">
+                  <a class="nav-link px-2" href={`${base}/account`}>
                     <i class="bi bi-person-circle me-1"></i>Account
                   </a>
                 )}
                 {auth?.user && (
-                  <a class="nav-link px-2" href="/developer">
+                  <a class="nav-link px-2" href={`${base}/developer`}>
                     <i class="bi bi-code-square me-1"></i>Developer
                   </a>
                 )}
                 {isAdmin && (
-                  <a class="nav-link px-2" href="/admin">
+                  <a class="nav-link px-2" href={adminHref}>
                     <i class="bi bi-shield-lock me-1"></i>Admin
                   </a>
                 )}
-                <a class="nav-link px-2" href="/docs">
+                {!auth?.isSuperuser && hasSuperuserSession && (
+                  <a class="nav-link px-2" href="/u/superuser/admin" title="Open Superuser Admin Console">
+                    <i class="bi bi-shield-shaded me-1 text-success"></i>Superuser
+                  </a>
+                )}
+                <a class="nav-link px-2" href={`${base}/docs`}>
                   <i class="bi bi-book me-1"></i>Docs
                 </a>
               </div>

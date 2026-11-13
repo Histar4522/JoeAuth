@@ -9,10 +9,10 @@ export async function verifyTurnstile(
   remoteIp?: string
 ): Promise<TurnstileResult> {
   if (!secretKey) {
-    return { ok: false, error: 'Turnstile secret key is not configured on the server.' };
+    return { ok: false, error: 'Verification service is currently unavailable.' };
   }
   if (!token || !token.trim()) {
-    return { ok: false, error: 'Please complete the Cloudflare Turnstile verification.' };
+    return { ok: false, error: 'Please complete the verification check.' };
   }
 
   const form = new URLSearchParams();
@@ -27,17 +27,14 @@ export async function verifyTurnstile(
       body: form.toString(),
     });
     if (!resp.ok) {
-      return { ok: false, error: 'Turnstile verification service unavailable.' };
+      return { ok: false, error: 'Verification service is temporarily unavailable.' };
     }
     const data = (await resp.json()) as { success?: boolean; 'error-codes'?: string[] };
     if (!data.success) {
-      return {
-        ok: false,
-        error: `Turnstile check failed (${(data['error-codes'] || ['invalid']).join(', ')}).`,
-      };
+      return { ok: false, error: 'Verification failed. Please try again.' };
     }
     return { ok: true };
   } catch {
-    return { ok: false, error: 'Failed to reach Cloudflare Turnstile verification endpoint.' };
+    return { ok: false, error: 'Verification service is temporarily unavailable.' };
   }
 }

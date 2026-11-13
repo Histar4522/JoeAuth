@@ -10,6 +10,7 @@ import {
   verifySuperuserPassword,
 } from '../src/lib/crypto';
 import { evaluateRegistrationEmail, validateRulePattern } from '../src/lib/rules';
+import { MILD_AVATAR_PALETTE, pickRandomMildColor, renderInitialAvatarSvg, validatePng256 } from '../src/lib/images';
 import type { RegistrationRuleRow } from '../src/types';
 
 describe('Crypto utilities', () => {
@@ -50,7 +51,7 @@ describe('Crypto utilities', () => {
   it('generates valid TOTP base32 secrets and otpauth URIs', () => {
     const secret = generateTotpSecret();
     expect(secret).toMatch(/^[A-Z2-7]+$/);
-    const uri = buildTotpUri(secret, 'joe@joeuniverse.com', 'JoeAuth');
+    const uri = buildTotpUri(secret, 'joe@example.com', 'JoeAuth');
     expect(uri).toContain('otpauth://totp/JoeAuth');
     expect(uri).toContain(`secret=${secret}`);
   });
@@ -58,7 +59,7 @@ describe('Crypto utilities', () => {
 
 describe('Registration email regex rules', () => {
   it('denies everything by default when no rules exist', () => {
-    const res = evaluateRegistrationEmail('joe@joeuniverse.com', []);
+    const res = evaluateRegistrationEmail('joe@example.com', []);
     expect(res.allowed).toBe(false);
   });
 
@@ -77,7 +78,7 @@ describe('Registration email regex rules', () => {
       {
         id: 'r2',
         rule_type: 'allow',
-        pattern: '^[^@]+@joeuniverse\\.com$',
+        pattern: '^[^@]+@example\\.com$',
         description: 'Allow domain',
         priority: 100,
         is_active: 1,
@@ -86,13 +87,42 @@ describe('Registration email regex rules', () => {
       },
     ];
 
-    expect(evaluateRegistrationEmail('alice@joeuniverse.com', rules).allowed).toBe(true);
-    expect(evaluateRegistrationEmail('alice+spam@joeuniverse.com', rules).allowed).toBe(false);
-    expect(evaluateRegistrationEmail('bob@gmail.com', rules).allowed).toBe(false);
+    expect(evaluateRegistrationEmail('joe@example.com', rules).allowed).toBe(true);
+    expect(evaluateRegistrationEmail('joe+spam@example.com', rules).allowed).toBe(false);
+    expect(evaluateRegistrationEmail('other@invalid.example', rules).allowed).toBe(false);
   });
 
   it('rejects nested-quantifier ReDoS patterns', () => {
     expect(validateRulePattern('(a+)+$').valid).toBe(false);
-    expect(validateRulePattern('^[^@]+@joeuniverse\\.com$').valid).toBe(true);
+    expect(validateRulePattern('^[^@]+@example\\.com$').valid).toBe(true);
+  });
+});
+
+function buildTestPng(width: number, height: number, size = 48): Uint8Array {
+  const buf = new Uint8Array(Math.max(size, 33));
+  buf.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  const view = new DataView(buf.buffer);
+  view.setUint32(8, 13, false);
+  buf.set([0x49, 0x48, 0x44, 0x52], 12);
+  view.setUint32(16, width, false);
+  view.setUint32(20, height, false);
+  return buf;
+}
+
+describe('Image validation & initial avatar helpers', () => {
+  it('accepts 256x256 PNG <= 128 KiB and rejects non-PNG, wrong dimensions, and oversized files', () => {
+    expect(validatePng256(buildTestPng(256, 256, 64)).ok).toBe(true);
+    expect(validatePng256(buildTestPng(128, 256, 64)).ok).toBe(false);
+    expect(validatePng256(buildTestPng(256, 256, 131073)).ok).toBe(false);
+    expect(validatePng256(new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3])).ok).toBe(false);
+  });
+
+  it('generates mild palette colors and SVG initial avatars', () => {
+    const color = pickRandomMildColor();
+    expect(MILD_AVATAR_PALETTE.some((p) => p.bg === color)).toBe(true);
+    const svg = renderInitialAvatarSvg('Joe Doe', color);
+    expect(svg).toContain('width="256"');
+    expect(svg).toContain(color);
+    expect(svg).toContain('>J<');
   });
 });
