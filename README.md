@@ -16,11 +16,11 @@ Centralized Single Sign-On (SSO) and OpenID Connect / OAuth 2.0 Identity Provide
 
 ## Documentation
 
-Full integration and API docs live in **[docs/](./docs/README.md)**:
-- **[Documentation Hub & Integration Workflow](./docs/README.md)**
-- **[OAuth 2.0 & OIDC Endpoint Reference](./docs/oauth-oidc-reference.md)**
-- **[Token Verification & Signed Webhooks](./docs/webhooks-and-verification.md)**
-- **[Framework Integration Presets](./docs/framework-presets.md)**
+Full integration and API docs are published on the **[GitHub Wiki](https://github.com/Histar4522/JoeAuth/wiki)** (and mirrored under [docs/](./docs/README.md)):
+- **[Documentation Hub & Integration Workflow](https://github.com/Histar4522/JoeAuth/wiki)** ([`docs/README.md`](./docs/README.md))
+- **[OAuth 2.0 & OIDC Endpoint Reference](https://github.com/Histar4522/JoeAuth/wiki/OAuth-OIDC-Reference)** ([`docs/oauth-oidc-reference.md`](./docs/oauth-oidc-reference.md))
+- **[Token Verification & Signed Webhooks](https://github.com/Histar4522/JoeAuth/wiki/Webhooks-and-Verification)** ([`docs/webhooks-and-verification.md`](./docs/webhooks-and-verification.md))
+- **[Framework Integration Presets](https://github.com/Histar4522/JoeAuth/wiki/Framework-Presets)** ([`docs/framework-presets.md`](./docs/framework-presets.md))
 
 ## Local Setup
 
