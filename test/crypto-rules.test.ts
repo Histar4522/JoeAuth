@@ -1,17 +1,26 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildTotpUri,
+  decryptSecretValue,
+  encryptSecretValue,
+  generateRecoveryCodes,
   generateTotpSecret,
   hashPassword,
+  hmacSha256Hex,
+  normalizeRecoveryCode,
   sha256Hex,
   signEd25519Jwt,
+  signWebhookPayload,
   verifyEd25519Jwt,
+  verifyEd25519JwtWithEnv,
   verifyPassword,
   verifySuperuserPassword,
 } from '../src/lib/crypto';
 import { evaluateRegistrationEmail, validateRulePattern } from '../src/lib/rules';
 import { MILD_AVATAR_PALETTE, pickRandomMildColor, renderInitialAvatarSvg, validatePng256 } from '../src/lib/images';
-import type { RegistrationRuleRow } from '../src/types';
+import { isSafeWebhookUrl } from '../src/lib/webhooks';
+import { parseUserAgentSummary } from '../src/lib/session';
+import type { Bindings, RegistrationRuleRow } from '../src/types';
 
 describe('Crypto utilities', () => {
   it('hashes and verifies passwords with salt + pepper via HMAC-SHA256', async () => {
@@ -124,5 +133,67 @@ describe('Image validation & initial avatar helpers', () => {
     expect(svg).toContain('width="256"');
     expect(svg).toContain(color);
     expect(svg).toContain('>J<');
+  });
+});
+
+describe('Security rotation, recovery codes, encryption, and SSRF protection', () => {
+  it('supports multi-key JWKS rotation & ignoreExpiration verification', async () => {
+    const oldKp = (await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify'])) as CryptoKeyPair;
+    const newKp = (await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify'])) as CryptoKeyPair;
+    const oldPriv = JSON.stringify({ ...(await crypto.subtle.exportKey('jwk', oldKp.privateKey)), kid: 'old-k' });
+    const oldPub = JSON.stringify({ ...(await crypto.subtle.exportKey('jwk', oldKp.publicKey)), kid: 'old-k' });
+    const newPub = JSON.stringify({ ...(await crypto.subtle.exportKey('jwk', newKp.publicKey)), kid: 'new-k' });
+
+    const token = await signEd25519Jwt({ sub: 'user-old' }, oldPriv, 300);
+    const fakeEnv = {
+      JWT_PUBLIC_JWK: newPub,
+      JWT_PREVIOUS_PUBLIC_JWK: oldPub,
+    } as unknown as Bindings;
+
+    const claims = await verifyEd25519JwtWithEnv(token, fakeEnv);
+    expect(claims?.sub).toBe('user-old');
+
+    const expiredToken = await signEd25519Jwt({ sub: 'user-exp' }, oldPriv, -60);
+    expect(await verifyEd25519JwtWithEnv(expiredToken, fakeEnv)).toBeNull();
+    expect((await verifyEd25519JwtWithEnv(expiredToken, fakeEnv, { ignoreExpiration: true }))?.sub).toBe('user-exp');
+  });
+
+  it('generates and normalizes backup recovery codes', () => {
+    const codes = generateRecoveryCodes(8);
+    expect(codes).toHaveLength(8);
+    for (const c of codes) {
+      expect(c).toMatch(/^[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+      expect(normalizeRecoveryCode(c.toLowerCase())).toBe(c.replace('-', ''));
+    }
+  });
+
+  it('encrypts and decrypts webhook secrets with AES-256-GCM and computes HMAC signatures', async () => {
+    const enc = await encryptSecretValue('whsec_secret_123', 'master-pepper');
+    expect(await decryptSecretValue(enc, 'master-pepper')).toBe('whsec_secret_123');
+    expect(await decryptSecretValue(enc, 'wrong-pepper')).toBeNull();
+
+    const sig = await signWebhookPayload('whsec_secret_123', 1700000000, '{"event":"test"}');
+    const hex = await hmacSha256Hex('whsec_secret_123', '1700000000.{"event":"test"}');
+    expect(sig).toBe(`t=1700000000,v1=${hex}`);
+  });
+
+  it('blocks private, loopback, link-local, and non-HTTPS webhook URLs', () => {
+    expect(isSafeWebhookUrl('https://hooks.example.com/events')).toBe(true);
+    expect(isSafeWebhookUrl('http://hooks.example.com/events')).toBe(false);
+    expect(isSafeWebhookUrl('https://localhost/hook')).toBe(false);
+    expect(isSafeWebhookUrl('https://127.0.0.1/hook')).toBe(false);
+    expect(isSafeWebhookUrl('https://169.254.169.254/latest/meta-data')).toBe(false);
+    expect(isSafeWebhookUrl('https://10.0.0.1/hook')).toBe(false);
+    expect(isSafeWebhookUrl('https://192.168.1.50/hook')).toBe(false);
+    expect(isSafeWebhookUrl('https://[::1]/hook')).toBe(false);
+    expect(isSafeWebhookUrl('https://[fc00::1]/hook')).toBe(false);
+    expect(isSafeWebhookUrl('https://service.local/hook')).toBe(false);
+  });
+
+  it('formats readable device summaries from User-Agent headers', () => {
+    expect(
+      parseUserAgentSummary('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128.0.0.0 Safari/537.36')
+    ).toBe('Chrome on Windows');
+    expect(parseUserAgentSummary('')).toBe('Unknown device');
   });
 });

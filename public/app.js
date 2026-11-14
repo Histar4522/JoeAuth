@@ -47,6 +47,21 @@
       .replace(/"/g, '&quot;');
   }
 
+  function b64uToBuf(str) {
+    const pad = str.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((str.length + 3) % 4);
+    const bin = atob(pad);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  function bufToB64u(buf) {
+    const bytes = new Uint8Array(buf);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
   function sanitizeReturnTo(raw, fallback = '/account') {
     const val = String(raw || '').trim();
     if (!val.startsWith('/') || val.startsWith('//') || val.startsWith('/\\')) return fallback;
@@ -286,6 +301,29 @@
   const loginForm = document.getElementById('login-form');
   if (loginForm) {
     const alertEl = document.getElementById('form-alert');
+    let useRecovery = false;
+    const toggleRecBtn = document.getElementById('toggle-recovery-mode');
+    const totpInput = document.getElementById('login-totp');
+    const recInput = document.getElementById('login-recovery-code');
+    const twoFaLabel = document.getElementById('login-2fa-label');
+
+    toggleRecBtn?.addEventListener('click', () => {
+      useRecovery = !useRecovery;
+      if (useRecovery) {
+        totpInput?.classList.add('hidden');
+        recInput?.classList.remove('hidden');
+        if (twoFaLabel) twoFaLabel.innerHTML = '<i class="bi bi-key me-1"></i>Recovery Code';
+        toggleRecBtn.textContent = 'Use authenticator code';
+        recInput?.focus();
+      } else {
+        recInput?.classList.add('hidden');
+        totpInput?.classList.remove('hidden');
+        if (twoFaLabel) twoFaLabel.innerHTML = '<i class="bi bi-shield-lock me-1"></i>Authenticator Code';
+        toggleRecBtn.textContent = 'Use recovery code';
+        totpInput?.focus();
+      }
+    });
+
     loginForm.addEventListener('submit', async (e) => {
       e.preventDefault();
       const fd = new FormData(loginForm);
@@ -295,7 +333,8 @@
           body: {
             email: fd.get('email'),
             password: fd.get('password'),
-            totpCode: fd.get('totpCode') || undefined,
+            totpCode: !useRecovery ? fd.get('totpCode') || undefined : undefined,
+            recoveryCode: useRecovery ? fd.get('recoveryCode') || undefined : undefined,
             turnstileToken: getTurnstileToken(loginForm),
           },
         });
@@ -307,6 +346,73 @@
         resetTurnstile();
         showAlert(alertEl, err.message);
       }
+    });
+
+    document.getElementById('passkey-login-btn')?.addEventListener('click', async () => {
+      try {
+        if (!window.PublicKeyCredential || !navigator.credentials) {
+          throw new Error('Passkeys are not supported in this browser.');
+        }
+        const email = document.getElementById('login-email')?.value?.trim() || '';
+        const { challengeId, options } = await api('/api/auth/passkeys/login/options', {
+          method: 'POST',
+          body: { email: email || undefined },
+        });
+        const assertion = await navigator.credentials.get({
+          publicKey: {
+            ...options,
+            challenge: b64uToBuf(options.challenge),
+            allowCredentials: (options.allowCredentials || []).map((c) => ({
+              ...c,
+              id: b64uToBuf(c.id),
+            })),
+          },
+        });
+        if (!assertion) throw new Error('Passkey authentication cancelled.');
+        const res = await api('/api/auth/passkeys/login/verify', {
+          method: 'POST',
+          body: {
+            challengeId,
+            credentialId: assertion.id,
+            clientDataJSON: bufToB64u(assertion.response.clientDataJSON),
+            authenticatorData: bufToB64u(assertion.response.authenticatorData),
+            signature: bufToB64u(assertion.response.signature),
+          },
+        });
+        location.href = resolveAccountRedirect(loginForm.dataset.returnTo, res.slot, res.userCount);
+      } catch (err) {
+        showAlert(alertEl, err?.message || 'Passkey sign-in failed.');
+      }
+    });
+  }
+
+  const deviceApproveForm = document.getElementById('device-approve-form');
+  if (deviceApproveForm) {
+    const alertEl = document.getElementById('form-alert');
+    async function submitDeviceDecision(decision) {
+      const userCode = document.getElementById('device-user-code')?.value || '';
+      try {
+        const res = await api('/api/oauth/device/approve', {
+          method: 'POST',
+          body: { userCode, decision },
+        });
+        showAlert(
+          alertEl,
+          decision === 'allow'
+            ? `Device approved for ${res.appName}. You can return to your device.`
+            : `Authorization request for ${res.appName} denied.`,
+          'success'
+        );
+      } catch (err) {
+        showAlert(alertEl, err.message);
+      }
+    }
+    deviceApproveForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      submitDeviceDecision('allow');
+    });
+    document.getElementById('device-deny-btn')?.addEventListener('click', () => {
+      submitDeviceDecision('deny');
     });
   }
 
@@ -492,12 +598,48 @@
     } catch (err) { showAlert(panelAlert, err.message); }
   });
 
+  function showRecoveryCodes(codes) {
+    const box = document.getElementById('recovery-codes-box');
+    const list = document.getElementById('recovery-codes-list');
+    if (box && list && Array.isArray(codes)) {
+      list.textContent = codes.join('\n');
+      box.classList.remove('hidden');
+    }
+  }
+
+  document.getElementById('copy-recovery-codes-btn')?.addEventListener('click', async () => {
+    const txt = document.getElementById('recovery-codes-list')?.textContent || '';
+    if (txt && navigator.clipboard) {
+      await navigator.clipboard.writeText(txt).catch(() => {});
+      showAlert(panelAlert, 'Recovery codes copied to clipboard.', 'success');
+    }
+  });
+
   document.getElementById('totp-verify-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
     try {
-      await api('/api/user/2fa/verify', { method: 'POST', body: { code: fd.get('code') } });
-      location.reload();
+      const res = await api('/api/user/2fa/verify', { method: 'POST', body: { code: fd.get('code') } });
+      if (res.recoveryCodes) {
+        document.getElementById('totp-setup-box')?.classList.add('hidden');
+        showRecoveryCodes(res.recoveryCodes);
+      } else {
+        location.reload();
+      }
+    } catch (err) { showAlert(panelAlert, err.message); }
+  });
+
+  document.getElementById('regenerate-recovery-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    try {
+      const res = await api('/api/user/2fa/recovery-codes/regenerate', {
+        method: 'POST',
+        body: { currentPassword: fd.get('currentPassword') },
+      });
+      e.target.reset();
+      showRecoveryCodes(res.recoveryCodes);
+      showAlert(panelAlert, 'Generated fresh recovery codes. Old codes are invalidated.', 'success');
     } catch (err) { showAlert(panelAlert, err.message); }
   });
 
@@ -520,16 +662,84 @@
     } catch (err) { showAlert(panelAlert, err.message); }
   });
 
+  const passkeysListEl = document.getElementById('passkeys-list');
+  async function loadPasskeys() {
+    if (!passkeysListEl) return;
+    try {
+      const rows = await api('/api/user/passkeys');
+      passkeysListEl.innerHTML = rows.length
+        ? `<table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Name</th><th>Added</th><th>Last Used</th><th></th></tr></thead><tbody>${rows
+            .map(
+              (p) => `<tr>
+                <td><i class="bi bi-key me-1 text-primary"></i>${esc(p.name)}</td>
+                <td>${new Date(p.created_at * 1000).toLocaleDateString()}</td>
+                <td>${p.last_used_at ? new Date(p.last_used_at * 1000).toLocaleString() : 'Never'}</td>
+                <td class="text-end"><button class="btn btn-sm btn-outline-danger" data-delete-passkey="${esc(p.id)}">Remove</button></td>
+              </tr>`
+            )
+            .join('')}</tbody></table>`
+        : '<p class="mb-0">No passkeys registered yet.</p>';
+      passkeysListEl.querySelectorAll('[data-delete-passkey]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          if (!confirm('Remove this passkey?')) return;
+          try {
+            await api(`/api/user/passkeys/${btn.dataset.deletePasskey}`, { method: 'DELETE', body: {} });
+            showAlert(panelAlert, 'Passkey removed.', 'success');
+            loadPasskeys();
+          } catch (err) { showAlert(panelAlert, err.message); }
+        });
+      });
+    } catch {}
+  }
+  loadPasskeys();
+
+  document.getElementById('add-passkey-btn')?.addEventListener('click', async () => {
+    try {
+      if (!window.PublicKeyCredential || !navigator.credentials) {
+        throw new Error('Passkeys are not supported in this browser.');
+      }
+      const nickname = document.getElementById('passkey-name-input')?.value?.trim() || 'Passkey';
+      const { challengeId, options } = await api('/api/user/passkeys/register/options', {
+        method: 'POST',
+        body: {},
+      });
+      const cred = await navigator.credentials.create({
+        publicKey: {
+          ...options,
+          challenge: b64uToBuf(options.challenge),
+          user: { ...options.user, id: b64uToBuf(options.user.id) },
+          excludeCredentials: (options.excludeCredentials || []).map((c) => ({ ...c, id: b64uToBuf(c.id) })),
+        },
+      });
+      if (!cred) throw new Error('Passkey creation cancelled.');
+      const transports = typeof cred.response.getTransports === 'function' ? cred.response.getTransports() : [];
+      await api('/api/user/passkeys/register/verify', {
+        method: 'POST',
+        body: {
+          challengeId,
+          name: nickname,
+          clientDataJSON: bufToB64u(cred.response.clientDataJSON),
+          attestationObject: bufToB64u(cred.response.attestationObject),
+          transports,
+        },
+      });
+      const input = document.getElementById('passkey-name-input');
+      if (input) input.value = '';
+      showAlert(panelAlert, 'Passkey added successfully.', 'success');
+      loadPasskeys();
+    } catch (err) { showAlert(panelAlert, err?.message || 'Could not add passkey.'); }
+  });
+
   const sessionsListEl = document.getElementById('sessions-list');
   async function loadSessions() {
     if (!sessionsListEl) return;
     try {
       const rows = await api('/api/user/sessions');
       sessionsListEl.innerHTML = rows.length
-        ? `<table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Device / Agent</th><th>IP Hash</th><th>Last Active</th><th></th></tr></thead><tbody>${rows
+        ? `<table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Device / Browser</th><th>IP Hash</th><th>Last Active</th><th></th></tr></thead><tbody>${rows
             .map(
               (s) => `<tr>
-                <td>${esc(s.user_agent || 'Unknown')} ${s.is_current ? '<span class="badge text-bg-success">Current</span>' : ''}</td>
+                <td><span class="fw-medium">${esc(s.device_label || 'Browser Session')}</span> ${s.is_current ? '<span class="badge text-bg-success ms-1">Current</span>' : ''}<br><span class="text-body-secondary">${esc(s.user_agent || '')}</span></td>
                 <td><code>${esc(s.ip_hash || '-')}</code></td>
                 <td>${new Date(s.last_seen_at * 1000).toLocaleString()}</td>
                 <td class="text-end">${s.is_current ? '' : `<button class="btn btn-sm btn-outline-secondary" data-revoke-session="${esc(s.id)}">Revoke</button>`}</td>
@@ -642,13 +852,18 @@
                         <span class="small text-body-secondary text-break">${esc(a.homepage_url)}</span>
                       </div>
                     </div>
-                    <span class="badge ${a.status === 'approved' ? 'text-bg-success' : 'text-bg-danger'}">${esc(a.status)}</span>
+                    <span class="d-flex gap-1 align-items-center">
+                      <span class="badge ${a.client_type === 'public' ? 'text-bg-info' : 'text-bg-secondary'}">${esc(a.client_type || 'confidential')}</span>
+                      <span class="badge ${a.status === 'approved' ? 'text-bg-success' : 'text-bg-danger'}">${esc(a.status)}</span>
+                    </span>
                   </div>
                   ${a.description ? `<div class="small mb-1">${esc(a.description)}</div>` : ''}
                   ${a.privilege_description ? `<div class="small text-body-secondary mb-1"><strong>Why access is requested:</strong> ${esc(a.privilege_description)}</div>` : ''}
                   <div class="small">Client ID: <code>${esc(a.client_id)}</code></div>
-                  <div class="small text-body-secondary">Secret Prefix: <code>${esc(a.client_secret_prefix)}...</code></div>
+                  ${a.client_type === 'public' ? '<div class="small text-body-secondary">Public client (PKCE S256 required)</div>' : `<div class="small text-body-secondary">Secret Prefix: <code>${esc(a.client_secret_prefix)}...</code></div>`}
                   <div class="small text-body-secondary">Redirects: ${a.redirect_uris.map((u) => `<code>${esc(u)}</code>`).join(', ')}</div>
+                  ${a.post_logout_redirect_uris?.length ? `<div class="small text-body-secondary">Post-Logout: ${a.post_logout_redirect_uris.map((u) => `<code>${esc(u)}</code>`).join(', ')}</div>` : ''}
+                  ${a.webhook_url ? `<div class="small text-body-secondary">Webhook: <code>${esc(a.webhook_url)}</code> ${a.has_webhook_secret ? '<span class="badge text-bg-success">Signed</span>' : ''}</div>` : ''}
                   <div class="d-flex flex-wrap gap-2 mt-2">
                     <label class="btn btn-sm btn-outline-primary mb-0">
                       <i class="bi bi-crop me-1"></i>${a.has_custom_logo ? 'Change Logo' : 'Upload Logo'}
@@ -656,7 +871,10 @@
                     </label>
                     ${a.has_custom_logo ? `<button class="btn btn-sm btn-outline-secondary" data-remove-app-logo="${esc(a.id)}"><i class="bi bi-x-circle me-1"></i>Reset Logo</button>` : ''}
                     <button class="btn btn-sm btn-outline-secondary" data-toggle-edit-app="${esc(a.id)}"><i class="bi bi-pencil me-1"></i>Edit</button>
-                    <button class="btn btn-sm btn-outline-secondary" data-rotate-app="${esc(a.id)}"><i class="bi bi-arrow-repeat me-1"></i>Rotate Secret</button>
+                    ${a.client_type !== 'public' ? `<button class="btn btn-sm btn-outline-secondary" data-rotate-app="${esc(a.id)}"><i class="bi bi-arrow-repeat me-1"></i>Rotate Secret</button>` : ''}
+                    <button class="btn btn-sm btn-outline-secondary" data-rotate-webhook="${esc(a.id)}"><i class="bi bi-key me-1"></i>Webhook Secret</button>
+                    ${a.webhook_url && a.has_webhook_secret ? `<button class="btn btn-sm btn-outline-secondary" data-test-webhook="${esc(a.id)}"><i class="bi bi-send me-1"></i>Test Webhook</button>` : ''}
+                    <button class="btn btn-sm btn-outline-secondary" data-view-app-logs="${esc(a.id)}" data-name="${esc(a.name)}"><i class="bi bi-journal-code me-1"></i>Error Logs</button>
                     <button class="btn btn-sm btn-danger" data-delete-app="${esc(a.id)}"><i class="bi bi-trash me-1"></i>Delete</button>
                   </div>
                   <form class="hidden mt-3 pt-3 border-top" data-edit-app-form="${esc(a.id)}">
@@ -679,6 +897,14 @@
                     <div class="mb-2">
                       <label class="form-label small mb-1">Redirect URIs (one per line)</label>
                       <textarea class="form-control form-control-sm font-monospace" name="redirectUris" rows="2" required>${esc(a.redirect_uris.join('\n'))}</textarea>
+                    </div>
+                    <div class="mb-2">
+                      <label class="form-label small mb-1">Post-Logout Redirect URIs (optional, one per line)</label>
+                      <textarea class="form-control form-control-sm font-monospace" name="postLogoutRedirectUris" rows="2">${esc((a.post_logout_redirect_uris || []).join('\n'))}</textarea>
+                    </div>
+                    <div class="mb-2">
+                      <label class="form-label small mb-1">Webhook URL (optional https://)</label>
+                      <input class="form-control form-control-sm" type="url" name="webhookUrl" value="${esc(a.webhook_url || '')}" placeholder="https://app.example.com/webhooks/joeauth">
                     </div>
                     <div class="d-flex flex-wrap gap-3 mb-2 small">
                       <label class="form-check-label"><input class="form-check-input me-1" type="checkbox" checked disabled> openid</label>
@@ -739,6 +965,10 @@
             .split(/\r?\n/)
             .map((s) => s.trim())
             .filter(Boolean);
+          const postLogoutRedirectUris = String(fd.get('postLogoutRedirectUris') || '')
+            .split(/\r?\n/)
+            .map((s) => s.trim())
+            .filter(Boolean);
           const allowedScopes = ['openid', ...Array.from(form.querySelectorAll('input[name="scopes"]:checked')).map((i) => i.value)];
           try {
             await api(`/api/dev/apps/${appId}`, {
@@ -749,6 +979,8 @@
                 description: fd.get('description'),
                 privilegeDescription: fd.get('privilegeDescription'),
                 redirectUris,
+                postLogoutRedirectUris,
+                webhookUrl: fd.get('webhookUrl') || '',
                 allowedScopes: Array.from(new Set(allowedScopes)),
               },
             });
@@ -768,10 +1000,71 @@
               body: { currentPassword: pwd },
             });
             document.getElementById('reveal-client-id').textContent = '(unchanged)';
+            document.getElementById('reveal-client-secret-wrap')?.classList.remove('hidden');
             document.getElementById('reveal-client-secret').textContent = res.client_secret;
+            document.getElementById('reveal-webhook-secret-wrap')?.classList.add('hidden');
             document.getElementById('secret-reveal-box')?.classList.remove('hidden');
             loadDevApps();
           } catch (err) { showAlert(panelAlert, err.message); }
+        });
+      });
+
+      devAppsEl.querySelectorAll('[data-rotate-webhook]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const pwd = prompt('Confirm your password to generate a new Webhook Signing Secret:');
+          if (!pwd) return;
+          try {
+            const res = await api(`/api/dev/apps/${btn.dataset.rotateWebhook}/webhook-secret`, {
+              method: 'POST',
+              body: { currentPassword: pwd },
+            });
+            document.getElementById('reveal-client-id').textContent = '(unchanged)';
+            document.getElementById('reveal-client-secret-wrap')?.classList.add('hidden');
+            document.getElementById('reveal-webhook-secret').textContent = res.webhook_secret;
+            document.getElementById('reveal-webhook-secret-wrap')?.classList.remove('hidden');
+            document.getElementById('secret-reveal-box')?.classList.remove('hidden');
+            loadDevApps();
+          } catch (err) { showAlert(panelAlert, err.message); }
+        });
+      });
+
+      devAppsEl.querySelectorAll('[data-test-webhook]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          try {
+            const res = await api(`/api/dev/apps/${btn.dataset.testWebhook}/webhook-test`, { method: 'POST', body: {} });
+            showAlert(
+              panelAlert,
+              res.delivered ? `Test webhook delivered (HTTP ${res.status}).` : `Webhook delivery failed (status ${res.status || 'network error'}).`,
+              res.delivered ? 'success' : 'error'
+            );
+          } catch (err) { showAlert(panelAlert, err.message); }
+        });
+      });
+
+      devAppsEl.querySelectorAll('[data-view-app-logs]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const box = document.getElementById('app-error-logs-box');
+          const title = document.getElementById('app-error-logs-title');
+          const out = document.getElementById('app-error-logs-content');
+          if (!box || !out) return;
+          if (title) title.textContent = `OAuth Error Logs — ${btn.dataset.name || 'App'}`;
+          box.classList.remove('hidden');
+          out.textContent = 'Loading error logs...';
+          try {
+            const logs = await api(`/api/dev/apps/${btn.dataset.viewAppLogs}/logs`);
+            out.innerHTML = logs.length
+              ? `<table class="table table-sm mb-0"><thead><tr><th>Time</th><th>Endpoint</th><th>Error</th><th>Detail</th></tr></thead><tbody>${logs
+                  .map(
+                    (l) => `<tr>
+                      <td class="text-nowrap">${new Date(l.created_at * 1000).toLocaleString()}</td>
+                      <td><code>${esc(l.endpoint)}</code></td>
+                      <td><code>${esc(l.error_code)}</code></td>
+                      <td>${esc(l.detail)}</td>
+                    </tr>`
+                  )
+                  .join('')}</tbody></table>`
+              : '<p class="mb-0">No OAuth errors recorded for this application.</p>';
+          } catch (err) { out.textContent = err.message; }
         });
       });
 
@@ -843,11 +1136,69 @@
 
   clearCreateLogoBtn?.addEventListener('click', resetCreateAppLogoPreview);
 
+  document.getElementById('toggle-jwt-inspector-btn')?.addEventListener('click', () => {
+    document.getElementById('jwt-inspector-box')?.classList.toggle('hidden');
+  });
+  document.getElementById('close-jwt-inspector-btn')?.addEventListener('click', () => {
+    document.getElementById('jwt-inspector-box')?.classList.add('hidden');
+  });
+  document.getElementById('close-app-logs-btn')?.addEventListener('click', () => {
+    document.getElementById('app-error-logs-box')?.classList.add('hidden');
+  });
+
+  document.getElementById('jwt-inspector-verify-btn')?.addEventListener('click', async () => {
+    const out = document.getElementById('jwt-inspector-result');
+    const token = document.getElementById('jwt-inspector-input')?.value?.trim() || '';
+    if (!out) return;
+    const parts = token.split('.');
+    if (parts.length !== 3) {
+      out.innerHTML = '<div class="text-danger">Invalid JWT structure (expected header.payload.signature).</div>';
+      return;
+    }
+    try {
+      const decJson = (b64) => JSON.parse(new TextDecoder().decode(b64uToBuf(b64)));
+      const header = decJson(parts[0]);
+      const payload = decJson(parts[1]);
+      const jwksResp = await fetch('/.well-known/jwks.json');
+      const { keys } = await jwksResp.json();
+      const signingInput = new TextEncoder().encode(`${parts[0]}.${parts[1]}`);
+      const sigBytes = b64uToBuf(parts[2]);
+
+      const candidates = header.kid ? (keys || []).filter((k) => !k.kid || k.kid === header.kid) : keys || [];
+      let sigValid = false;
+      for (const jwk of candidates.length ? candidates : keys || []) {
+        try {
+          const pubKey = await crypto.subtle.importKey('jwk', jwk, { name: 'Ed25519' }, false, ['verify']);
+          if (await crypto.subtle.verify('Ed25519', pubKey, sigBytes, signingInput)) {
+            sigValid = true;
+            break;
+          }
+        } catch {}
+      }
+      const now = Math.floor(Date.now() / 1000);
+      const expired = typeof payload.exp === 'number' && payload.exp <= now;
+      out.innerHTML = `<div class="mb-2">
+          <span class="badge ${sigValid ? 'text-bg-success' : 'text-bg-danger'} me-1">${sigValid ? 'Signature Valid (Ed25519)' : 'Invalid Signature'}</span>
+          <span class="badge ${expired ? 'text-bg-warning' : 'text-bg-info'}">${expired ? 'Expired' : 'Active'}</span>
+        </div>
+        <div class="fw-semibold">Header</div>
+        <pre class="code-block mb-2">${esc(JSON.stringify(header, null, 2))}</pre>
+        <div class="fw-semibold">Payload</div>
+        <pre class="code-block mb-0">${esc(JSON.stringify(payload, null, 2))}</pre>`;
+    } catch (err) {
+      out.innerHTML = `<div class="text-danger">${esc(err?.message || 'Failed to parse JWT.')}</div>`;
+    }
+  });
+
   document.getElementById('create-app-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
     const form = e.target;
     const fd = new FormData(form);
     const redirectUris = String(fd.get('redirectUris') || '')
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const postLogoutRedirectUris = String(fd.get('postLogoutRedirectUris') || '')
       .split(/\r?\n/)
       .map((s) => s.trim())
       .filter(Boolean);
@@ -857,10 +1208,13 @@
         method: 'POST',
         body: {
           name: fd.get('name'),
+          clientType: fd.get('clientType') || 'confidential',
           homepageUrl: fd.get('homepageUrl'),
           description: fd.get('description'),
           privilegeDescription: fd.get('privilegeDescription'),
           redirectUris,
+          postLogoutRedirectUris,
+          webhookUrl: fd.get('webhookUrl') || '',
           allowedScopes: Array.from(new Set(allowedScopes)),
         },
       });
@@ -870,7 +1224,20 @@
         await api(`/api/dev/apps/${created.id}/logo`, { method: 'POST', body: logoFd });
       }
       document.getElementById('reveal-client-id').textContent = created.client_id;
-      document.getElementById('reveal-client-secret').textContent = created.client_secret;
+      const secretWrap = document.getElementById('reveal-client-secret-wrap');
+      if (created.client_secret) {
+        secretWrap?.classList.remove('hidden');
+        document.getElementById('reveal-client-secret').textContent = created.client_secret;
+      } else {
+        secretWrap?.classList.add('hidden');
+      }
+      const whWrap = document.getElementById('reveal-webhook-secret-wrap');
+      if (created.webhook_secret) {
+        whWrap?.classList.remove('hidden');
+        document.getElementById('reveal-webhook-secret').textContent = created.webhook_secret;
+      } else {
+        whWrap?.classList.add('hidden');
+      }
       document.getElementById('secret-reveal-box')?.classList.remove('hidden');
       form.reset();
       resetCreateAppLogoPreview();
@@ -968,11 +1335,17 @@
       }
     }
 
-    async function loadAuditLogs() {
+    let auditPage = 1;
+    async function loadAuditLogs(page = auditPage) {
+      auditPage = Math.max(1, page);
       const form = document.getElementById('admin-audit-filter-form');
       const category = form?.querySelector('[name="category"]')?.value || 'all';
       const q = form?.querySelector('[name="q"]')?.value || '';
-      const logs = await api(`/api/admin/audit-logs?category=${encodeURIComponent(category)}&q=${encodeURIComponent(q)}`);
+      const data = await api(
+        `/api/admin/audit-logs?category=${encodeURIComponent(category)}&q=${encodeURIComponent(q)}&page=${auditPage}&limit=25`
+      );
+      const logs = data.logs || [];
+      auditPage = data.page || 1;
       const auditEl = document.getElementById('admin-audit-list');
       auditEl.innerHTML = logs.length
         ? `<table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th>Metadata</th></tr></thead><tbody>${logs
@@ -987,14 +1360,38 @@
             )
             .join('')}</tbody></table>`
         : '<p class="mb-0">No matching audit logs.</p>';
+
+      const pagEl = document.getElementById('admin-audit-pagination');
+      if (pagEl) {
+        pagEl.innerHTML = `
+          <span class="text-body-secondary">Showing page ${data.page} of ${data.totalPages} (${data.total} total)</span>
+          <div class="btn-group btn-group-sm">
+            <button type="button" class="btn btn-outline-secondary" id="audit-prev-btn" ${data.page <= 1 ? 'disabled' : ''}>Previous</button>
+            <button type="button" class="btn btn-outline-secondary" id="audit-next-btn" ${data.page >= data.totalPages ? 'disabled' : ''}>Next</button>
+          </div>
+        `;
+        document.getElementById('audit-prev-btn')?.addEventListener('click', () => loadAuditLogs(auditPage - 1));
+        document.getElementById('audit-next-btn')?.addEventListener('click', () => loadAuditLogs(auditPage + 1));
+      }
     }
+
+    document.querySelectorAll('[data-export-audit]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const form = document.getElementById('admin-audit-filter-form');
+        const category = form?.querySelector('[name="category"]')?.value || 'all';
+        const q = form?.querySelector('[name="q"]')?.value || '';
+        const format = btn.dataset.exportAudit;
+        const url = `${accountBase}/api/admin/audit-logs/export?format=${encodeURIComponent(format)}&category=${encodeURIComponent(category)}&q=${encodeURIComponent(q)}`;
+        window.location.href = url;
+      });
+    });
 
     document.getElementById('admin-audit-filter-form')?.addEventListener('submit', (e) => {
       e.preventDefault();
-      loadAuditLogs().catch((err) => showAlert(panelAlert, err.message));
+      loadAuditLogs(1).catch((err) => showAlert(panelAlert, err.message));
     });
     document.querySelector('#admin-audit-filter-form [name="category"]')?.addEventListener('change', () => {
-      loadAuditLogs().catch((err) => showAlert(panelAlert, err.message));
+      loadAuditLogs(1).catch((err) => showAlert(panelAlert, err.message));
     });
 
     const auditPurgeLabels = {
@@ -1229,6 +1626,12 @@
                 <td>
                   <div class="d-flex flex-wrap gap-1">
                     <button
+                      class="btn btn-sm btn-outline-primary"
+                      data-inspect-user="${esc(u.id)}"
+                    >
+                      <i class="bi bi-search me-1"></i>Inspect
+                    </button>
+                    <button
                       class="btn btn-sm ${u.status === 'active' ? 'btn-outline-warning' : 'btn-outline-success'}"
                       data-toggle-user="${esc(u.id)}"
                       data-status="${esc(u.status)}"
@@ -1282,6 +1685,42 @@
             })
             .join('')}</tbody></table>`
         : '<p class="mb-0">No users found.</p>';
+
+      el.querySelectorAll('[data-inspect-user]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const card = document.getElementById('admin-user-inspector-card');
+          const title = document.getElementById('admin-user-inspector-title');
+          const body = document.getElementById('admin-user-inspector-body');
+          if (!card || !body) return;
+          card.classList.remove('hidden');
+          body.textContent = 'Loading user details...';
+          try {
+            const d = await api(`/api/admin/users/${btn.dataset.inspectUser}/details`);
+            if (title) title.textContent = `User Inspector — ${d.user.name} (${d.user.email})`;
+            body.innerHTML = `
+              <div class="row g-3">
+                <div class="col-md-6">
+                  <strong>Active Sessions (${d.sessions.length})</strong>
+                  <ul class="list-unstyled mt-1 mb-2">${d.sessions.map((s) => `<li><code>${esc(s.device_label || s.user_agent || 'Session')}</code> — ${new Date(s.last_seen_at * 1000).toLocaleString()}</li>`).join('') || '<li>None</li>'}</ul>
+                  <strong>Passkeys (${d.passkeys.length})</strong>
+                  <ul class="list-unstyled mt-1 mb-0">${d.passkeys.map((p) => `<li>${esc(p.name)} (${new Date(p.created_at * 1000).toLocaleDateString()})</li>`).join('') || '<li>None</li>'}</ul>
+                </div>
+                <div class="col-md-6">
+                  <strong>Connected Apps (${d.consents.length})</strong>
+                  <ul class="list-unstyled mt-1 mb-2">${d.consents.map((c) => `<li>${esc(c.name)} <code>${esc(c.scopes)}</code></li>`).join('') || '<li>None</li>'}</ul>
+                  <strong>Owned OAuth Apps (${d.ownedApps.length})</strong>
+                  <ul class="list-unstyled mt-1 mb-0">${d.ownedApps.map((a) => `<li>${esc(a.name)} (<code>${esc(a.client_id)}</code>, ${esc(a.client_type)})</li>`).join('') || '<li>None</li>'}</ul>
+                </div>
+                <div class="col-12">
+                  <strong>Recent Activity (${d.auditLogs.length})</strong>
+                  <div class="mt-1">${d.auditLogs.slice(0, 10).map((l) => `<div><span class="text-body-secondary">${new Date(l.created_at * 1000).toLocaleString()}</span> <code>${esc(l.action)}</code></div>`).join('') || 'None'}</div>
+                </div>
+              </div>
+            `;
+            card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          } catch (err) { body.textContent = err.message; }
+        });
+      });
 
       el.querySelectorAll('[data-toggle-user]').forEach((btn) => {
         btn.addEventListener('click', async () => {
@@ -1466,42 +1905,15 @@
       });
     }
 
+    document.getElementById('close-user-inspector-btn')?.addEventListener('click', () => {
+      document.getElementById('admin-user-inspector-card')?.classList.add('hidden');
+    });
+
     loadAdminOverview();
     loadAuditLogs();
     loadRules();
     loadDevApplications();
     loadUsers();
     loadAdminApps();
-  }
-
-  // --- Docs Interactive PKCE URL Builder ---
-  const builder = document.getElementById('docs-url-builder');
-  if (builder) {
-    document.getElementById('doc-generate-btn')?.addEventListener('click', async () => {
-      const clientId = document.getElementById('doc-client-id').value.trim();
-      const redirectUri = document.getElementById('doc-redirect-uri').value.trim();
-      const scope = document.getElementById('doc-scope').value.trim() || 'openid profile email';
-      if (!clientId || !redirectUri) return;
-
-      const random = crypto.getRandomValues(new Uint8Array(32));
-      const verifier = btoa(String.fromCharCode(...random)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
-      const challenge = btoa(String.fromCharCode(...new Uint8Array(digest))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-
-      const params = new URLSearchParams({
-        client_id: clientId,
-        redirect_uri: redirectUri,
-        response_type: 'code',
-        scope,
-        state: 'demo_state_' + Math.random().toString(36).slice(2, 10),
-        code_challenge: challenge,
-        code_challenge_method: 'S256',
-      });
-      const authUrl = `${builder.dataset.issuer}/oauth/authorize?${params.toString()}`;
-      document.getElementById('doc-verifier').textContent = verifier;
-      document.getElementById('doc-auth-url').textContent = authUrl;
-      document.getElementById('doc-launch-link').href = authUrl;
-      document.getElementById('doc-generated-out')?.classList.remove('hidden');
-    });
   }
 })();

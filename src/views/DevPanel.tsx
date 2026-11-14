@@ -85,10 +85,11 @@ export const DevPanel: FC<{
       ) : (
         <>
           <div id="secret-reveal-box" class="alert alert-success hidden">
-            <strong><i class="bi bi-key-fill me-1"></i>Copy your Client Secret now!</strong> It will not be shown again.
+            <strong><i class="bi bi-key-fill me-1"></i>Copy your credentials now!</strong> Secrets will not be shown again.
             <div class="mt-2 small font-monospace">
               <div>Client ID: <code id="reveal-client-id"></code></div>
-              <div>Client Secret: <code id="reveal-client-secret"></code></div>
+              <div id="reveal-client-secret-wrap">Client Secret: <code id="reveal-client-secret"></code></div>
+              <div id="reveal-webhook-secret-wrap" class="hidden">Webhook Signing Secret: <code id="reveal-webhook-secret"></code></div>
             </div>
           </div>
 
@@ -97,7 +98,7 @@ export const DevPanel: FC<{
               <section class="card shadow-sm h-100">
                 <div class="card-body">
                   <h2 class="h5 fw-semibold mb-1">
-                    <i class="bi bi-plus-circle me-2 text-primary"></i>Create Application Token
+                    <i class="bi bi-plus-circle me-2 text-primary"></i>Create Application
                   </h2>
                   <p class="text-body-secondary small mb-3">
                     New applications are approved immediately for approved developers.
@@ -106,6 +107,13 @@ export const DevPanel: FC<{
                     <div class="mb-3">
                       <label class="form-label" for="app-name">Application Name</label>
                       <input id="app-name" class="form-control" type="text" name="name" required minlength={2} maxlength={64} placeholder="Example App" />
+                    </div>
+                    <div class="mb-3">
+                      <label class="form-label" for="app-client-type">Client Type</label>
+                      <select id="app-client-type" class="form-select" name="clientType">
+                        <option value="confidential">Confidential (Backend web app with Client Secret)</option>
+                        <option value="public">Public (SPA / Mobile / CLI — PKCE S256 required)</option>
+                      </select>
                     </div>
                     <div class="mb-3">
                       <label class="form-label" for="app-url">Homepage URL</label>
@@ -155,6 +163,26 @@ export const DevPanel: FC<{
                       ></textarea>
                     </div>
                     <div class="mb-3">
+                      <label class="form-label" for="app-logout-redirects">Post-Logout Redirect URIs (optional, one per line)</label>
+                      <textarea
+                        id="app-logout-redirects"
+                        class="form-control font-monospace small"
+                        name="postLogoutRedirectUris"
+                        rows={2}
+                        placeholder="https://app.example.com/signed-out"
+                      ></textarea>
+                    </div>
+                    <div class="mb-3">
+                      <label class="form-label" for="app-webhook-url">Lifecycle Webhook URL (optional https://)</label>
+                      <input
+                        id="app-webhook-url"
+                        class="form-control"
+                        type="url"
+                        name="webhookUrl"
+                        placeholder="https://app.example.com/webhooks/joeauth"
+                      />
+                    </div>
+                    <div class="mb-3">
                       <div class="form-label mb-1">Allowed Scopes</div>
                       <div class="d-flex flex-wrap gap-3">
                         <label class="form-check-label">
@@ -182,9 +210,41 @@ export const DevPanel: FC<{
             <div class="col-lg-7">
               <section class="card shadow-sm h-100">
                 <div class="card-body">
-                  <h2 class="h5 fw-semibold mb-3">
-                    <i class="bi bi-app-indicator me-2 text-primary"></i>Your Registered Applications
-                  </h2>
+                  <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+                    <h2 class="h5 fw-semibold mb-0">
+                      <i class="bi bi-app-indicator me-2 text-primary"></i>Your Registered Applications
+                    </h2>
+                    <button type="button" id="toggle-jwt-inspector-btn" class="btn btn-sm btn-outline-secondary">
+                      <i class="bi bi-braces me-1"></i>JWT Inspector
+                    </button>
+                  </div>
+                  <div id="jwt-inspector-box" class="card bg-body-tertiary border mb-3 hidden">
+                    <div class="card-body p-3">
+                      <div class="d-flex justify-content-between align-items-center mb-2">
+                        <strong class="small"><i class="bi bi-shield-check me-1 text-primary"></i>Client-Side Ed25519 JWT Inspector</strong>
+                        <button type="button" class="btn-close btn-sm" id="close-jwt-inspector-btn" aria-label="Close"></button>
+                      </div>
+                      <textarea
+                        id="jwt-inspector-input"
+                        class="form-control form-control-sm font-monospace mb-2"
+                        rows={3}
+                        placeholder="Paste an access_token or id_token JWT to verify signature against JWKS and inspect claims..."
+                      ></textarea>
+                      <button type="button" id="jwt-inspector-verify-btn" class="btn btn-sm btn-primary mb-2">
+                        Verify Signature &amp; Decode
+                      </button>
+                      <div id="jwt-inspector-result" class="small"></div>
+                    </div>
+                  </div>
+                  <div id="app-error-logs-box" class="card bg-body-tertiary border mb-3 hidden">
+                    <div class="card-body p-3">
+                      <div class="d-flex justify-content-between align-items-center mb-2">
+                        <strong class="small" id="app-error-logs-title">OAuth Error Logs</strong>
+                        <button type="button" class="btn-close btn-sm" id="close-app-logs-btn" aria-label="Close"></button>
+                      </div>
+                      <div id="app-error-logs-content" class="small text-body-secondary"></div>
+                    </div>
+                  </div>
                   <div id="dev-apps-list" class="text-body-secondary small">Loading applications...</div>
                 </div>
               </section>

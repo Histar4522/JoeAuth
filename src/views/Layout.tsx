@@ -81,9 +81,6 @@ export const Layout: FC<PropsWithChildren<LayoutProps>> = ({
                     <i class="bi bi-shield-shaded me-1 text-success"></i>Superuser
                   </a>
                 )}
-                <a class="nav-link px-2" href={`${base}/docs`}>
-                  <i class="bi bi-book me-1"></i>Docs
-                </a>
               </div>
               <div class="d-flex align-items-center gap-2 ms-auto">
                 <ThemeSelect />

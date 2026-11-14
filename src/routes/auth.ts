@@ -2,12 +2,14 @@ import { Hono } from 'hono';
 import type { AppEnv, UserRow } from '../types';
 import {
   hashPassword,
+  normalizeRecoveryCode,
   nowSec,
   randomBase64Url,
   sha256Hex,
   verifyPassword,
   verifyTotpCode,
 } from '../lib/crypto';
+import { verifyAssertionResponse } from '../lib/webauthn';
 import {
   createSession,
   destroySession,
@@ -139,6 +141,7 @@ authRoutes.post('/login', rateLimitMiddleware('auth'), requireCsrf, async (c) =>
     email?: string;
     password?: string;
     totpCode?: string;
+    recoveryCode?: string;
     turnstileToken?: string;
   }>().catch(() => ({} as Record<string, undefined>));
 
@@ -150,10 +153,50 @@ authRoutes.post('/login', rateLimitMiddleware('auth'), requireCsrf, async (c) =>
     return c.json({ ok: false, error: { code: 'TURNSTILE_FAILED', message: ts.error } }, 400);
   }
 
+  const now = nowSec();
+  const emailHash = await sha256Hex(email);
+  const lockKey = `lockout:login:${emailHash}`;
+  let lockState: { count: number; lockedUntil: number } = { count: 0, lockedUntil: 0 };
+  if (email) {
+    const rawLock = await c.env.AUTH_CACHE.get(lockKey);
+    if (rawLock) {
+      try {
+        lockState = JSON.parse(rawLock) as { count: number; lockedUntil: number };
+      } catch {
+        lockState = { count: 0, lockedUntil: 0 };
+      }
+    }
+    if (lockState.lockedUntil > now) {
+      const waitSec = lockState.lockedUntil - now;
+      c.header('Retry-After', String(waitSec));
+      return c.json(
+        {
+          ok: false,
+          error: {
+            code: 'ACCOUNT_LOCKED',
+            message: `Too many failed login attempts. Try again in ${waitSec} seconds.`,
+          },
+        },
+        429
+      );
+    }
+  }
+
+  const recordFailedAttempt = async () => {
+    if (!email) return;
+    const nextCount = (lockState.count || 0) + 1;
+    const penalty = nextCount >= 8 ? 900 : nextCount >= 5 ? 60 : 0;
+    const lockedUntil = penalty > 0 ? now + penalty : 0;
+    await c.env.AUTH_CACHE.put(lockKey, JSON.stringify({ count: nextCount, lockedUntil }), {
+      expirationTtl: 900,
+    }).catch(() => {});
+  };
+
   const user = await c.env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).first<UserRow>();
   const ipHash = await getIpHash(c);
 
   if (!user || !(await verifyPassword(password, user.password_hash, getPepper(c.env)))) {
+    await recordFailedAttempt();
     await writeAuditLog(c.env.DB, {
       actorId: user?.id ?? null,
       action: 'user.login_failed',
@@ -185,14 +228,37 @@ authRoutes.post('/login', rateLimitMiddleware('auth'), requireCsrf, async (c) =>
   }
 
   if (user.totp_enabled === 1 && user.totp_secret) {
-    if (!body.totpCode) {
+    const totpInput = (body.totpCode || '').trim();
+    const recoveryInput = (body.recoveryCode || '').trim();
+    if (!totpInput && !recoveryInput) {
       return c.json(
         { ok: false, error: { code: 'TOTP_REQUIRED', message: 'Two-factor authentication code required.' } },
         401
       );
     }
-    const validTotp = await verifyTotpCode(user.totp_secret, body.totpCode);
-    if (!validTotp) {
+
+    let secondFactorOk = false;
+    let usedRecovery = false;
+    if (totpInput) {
+      secondFactorOk = await verifyTotpCode(user.totp_secret, totpInput);
+    } else if (recoveryInput) {
+      const normalized = normalizeRecoveryCode(recoveryInput);
+      if (normalized.length >= 8) {
+        const recHash = await sha256Hex(`${user.id}:${normalized}`);
+        const res = await c.env.DB.prepare(
+          'UPDATE user_recovery_codes SET used_at = ? WHERE user_id = ? AND code_hash = ? AND used_at IS NULL'
+        )
+          .bind(now, user.id, recHash)
+          .run();
+        if ((res.meta.changes ?? 0) > 0) {
+          secondFactorOk = true;
+          usedRecovery = true;
+        }
+      }
+    }
+
+    if (!secondFactorOk) {
+      await recordFailedAttempt();
       await writeAuditLog(c.env.DB, {
         actorId: user.id,
         action: 'user.login_failed_totp',
@@ -201,10 +267,30 @@ authRoutes.post('/login', rateLimitMiddleware('auth'), requireCsrf, async (c) =>
         ipHash,
       });
       return c.json(
-        { ok: false, error: { code: 'TOTP_INVALID', message: 'Invalid 2FA authenticator code.' } },
+        {
+          ok: false,
+          error: {
+            code: 'TOTP_INVALID',
+            message: recoveryInput ? 'Invalid or already used recovery code.' : 'Invalid 2FA authenticator code.',
+          },
+        },
         401
       );
     }
+
+    if (usedRecovery) {
+      await writeAuditLog(c.env.DB, {
+        actorId: user.id,
+        action: 'user.login_recovery_code',
+        targetType: 'user',
+        targetId: user.id,
+        ipHash,
+      });
+    }
+  }
+
+  if (email) {
+    await c.env.AUTH_CACHE.delete(lockKey).catch(() => {});
   }
 
   const session = await createSession(c, { userId: user.id });
@@ -365,19 +451,24 @@ authRoutes.post('/resend-verification', rateLimitMiddleware('auth'), requireCsrf
       .bind(email)
       .first<Pick<UserRow, 'id' | 'email' | 'email_verified' | 'status'>>();
     if (user && user.status === 'active' && user.email_verified === 0) {
-      const now = nowSec();
-      const rawToken = randomBase64Url(32);
-      const tokenHash = await sha256Hex(rawToken);
-      await c.env.DB.prepare(
-        'INSERT INTO verification_tokens (token_hash, user_id, purpose, expires_at, created_at) VALUES (?, ?, ?, ?, ?)'
-      )
-        .bind(tokenHash, user.id, 'email_verify', now + 1800, now)
-        .run();
+      const cooldownKey = `cooldown:mail:verify:${user.id}`;
+      const onCooldown = await c.env.AUTH_CACHE.get(cooldownKey);
+      if (!onCooldown) {
+        const now = nowSec();
+        const rawToken = randomBase64Url(32);
+        const tokenHash = await sha256Hex(rawToken);
+        await c.env.DB.prepare(
+          'INSERT INTO verification_tokens (token_hash, user_id, purpose, expires_at, created_at) VALUES (?, ?, ?, ?, ?)'
+        )
+          .bind(tokenHash, user.id, 'email_verify', now + 1800, now)
+          .run();
 
-      const origin = c.env.ISSUER_URL || new URL(c.req.url).origin;
-      const verifyUrl = `${origin}/api/auth/verify-email?token=${encodeURIComponent(rawToken)}`;
-      const content = verificationEmailContent(c.env.APP_NAME || 'JoeAuth', verifyUrl, 'verify');
-      await sendEmail(c.env, { to: user.email, ...content });
+        const origin = c.env.ISSUER_URL || new URL(c.req.url).origin;
+        const verifyUrl = `${origin}/api/auth/verify-email?token=${encodeURIComponent(rawToken)}`;
+        const content = verificationEmailContent(c.env.APP_NAME || 'JoeAuth', verifyUrl, 'verify');
+        await sendEmail(c.env, { to: user.email, ...content });
+        await c.env.AUTH_CACHE.put(cooldownKey, '1', { expirationTtl: 60 }).catch(() => {});
+      }
     }
   }
 
@@ -400,19 +491,24 @@ authRoutes.post('/forgot-password', rateLimitMiddleware('auth'), requireCsrf, as
       .bind(email)
       .first<{ id: string; email: string }>();
     if (user) {
-      const now = nowSec();
-      const rawToken = randomBase64Url(32);
-      const tokenHash = await sha256Hex(rawToken);
-      await c.env.DB.prepare(
-        'INSERT INTO verification_tokens (token_hash, user_id, purpose, expires_at, created_at) VALUES (?, ?, ?, ?, ?)'
-      )
-        .bind(tokenHash, user.id, 'password_reset', now + 1200, now)
-        .run();
+      const cooldownKey = `cooldown:mail:reset:${user.id}`;
+      const onCooldown = await c.env.AUTH_CACHE.get(cooldownKey);
+      if (!onCooldown) {
+        const now = nowSec();
+        const rawToken = randomBase64Url(32);
+        const tokenHash = await sha256Hex(rawToken);
+        await c.env.DB.prepare(
+          'INSERT INTO verification_tokens (token_hash, user_id, purpose, expires_at, created_at) VALUES (?, ?, ?, ?, ?)'
+        )
+          .bind(tokenHash, user.id, 'password_reset', now + 1200, now)
+          .run();
 
-      const origin = c.env.ISSUER_URL || new URL(c.req.url).origin;
-      const resetUrl = `${origin}/reset-password?token=${encodeURIComponent(rawToken)}`;
-      const content = passwordResetEmailContent(c.env.APP_NAME || 'JoeAuth', resetUrl);
-      await sendEmail(c.env, { to: user.email, ...content });
+        const origin = c.env.ISSUER_URL || new URL(c.req.url).origin;
+        const resetUrl = `${origin}/reset-password?token=${encodeURIComponent(rawToken)}`;
+        const content = passwordResetEmailContent(c.env.APP_NAME || 'JoeAuth', resetUrl);
+        await sendEmail(c.env, { to: user.email, ...content });
+        await c.env.AUTH_CACHE.put(cooldownKey, '1', { expirationTtl: 60 }).catch(() => {});
+      }
     }
   }
 
@@ -463,6 +559,162 @@ authRoutes.post('/reset-password', rateLimitMiddleware('auth'), requireCsrf, asy
   });
 
   return c.json({ ok: true, data: { message: 'Password updated. Please sign in with your new password.' } });
+});
+
+// --- WebAuthn Passkey Sign-In ---
+
+authRoutes.post('/passkeys/login/options', rateLimitMiddleware('auth'), requireCsrf, async (c) => {
+  const body = await c.req.json<{ email?: string }>().catch(() => ({} as Record<string, string | undefined>));
+  const email = (body.email || '').trim().toLowerCase();
+
+  let allowCredentials: Array<{ id: string; type: 'public-key'; transports?: string[] }> = [];
+  if (email) {
+    const { results } = await c.env.DB.prepare(
+      `SELECT wc.id AS credential_id, wc.transports
+       FROM webauthn_credentials wc
+       JOIN users u ON u.id = wc.user_id
+       WHERE u.email = ? AND u.status = 'active'`
+    )
+      .bind(email)
+      .all<{ credential_id: string; transports: string }>();
+    allowCredentials = (results || []).map((r) => {
+      let transports: string[] = [];
+      try {
+        transports = JSON.parse(r.transports) as string[];
+      } catch {
+        transports = [];
+      }
+      return {
+        id: r.credential_id,
+        type: 'public-key',
+        ...(transports.length > 0 ? { transports } : {}),
+      };
+    });
+  }
+
+  const challenge = randomBase64Url(32);
+  const challengeId = randomBase64Url(16);
+  const rpId = new URL(c.req.url).hostname;
+
+  await c.env.AUTH_CACHE.put(`passkey:login:${challengeId}`, JSON.stringify({ challenge }), {
+    expirationTtl: 300,
+  });
+
+  return c.json({
+    ok: true,
+    data: {
+      challengeId,
+      options: {
+        challenge,
+        rpId,
+        timeout: 60000,
+        userVerification: 'preferred',
+        allowCredentials,
+      },
+    },
+  });
+});
+
+authRoutes.post('/passkeys/login/verify', rateLimitMiddleware('auth'), requireCsrf, async (c) => {
+  const body = await c.req.json<{
+    challengeId?: string;
+    credentialId?: string;
+    clientDataJSON?: string;
+    authenticatorData?: string;
+    signature?: string;
+  }>().catch(() => ({} as Record<string, string | undefined>));
+
+  const challengeId = (body.challengeId || '').trim();
+  const credentialId = (body.credentialId || '').trim();
+  if (!challengeId || !credentialId || !body.clientDataJSON || !body.authenticatorData || !body.signature) {
+    return c.json({ ok: false, error: { code: 'INVALID_INPUT', message: 'Incomplete passkey response.' } }, 400);
+  }
+
+  const challengeKey = `passkey:login:${challengeId}`;
+  const rawChallenge = await c.env.AUTH_CACHE.get(challengeKey);
+  await c.env.AUTH_CACHE.delete(challengeKey).catch(() => {});
+  if (!rawChallenge) {
+    return c.json({ ok: false, error: { code: 'CHALLENGE_EXPIRED', message: 'Passkey sign-in expired. Try again.' } }, 400);
+  }
+
+  const { challenge } = JSON.parse(rawChallenge) as { challenge: string };
+  const cred = await c.env.DB.prepare(
+    'SELECT id, user_id, public_key_jwk, alg, sign_count FROM webauthn_credentials WHERE id = ?'
+  )
+    .bind(credentialId)
+    .first<{
+      id: string;
+      user_id: string;
+      public_key_jwk: string;
+      alg: number;
+      sign_count: number;
+    }>();
+
+  if (!cred) {
+    return c.json({ ok: false, error: { code: 'PASSKEY_NOT_FOUND', message: 'Passkey not recognized.' } }, 401);
+  }
+
+  const user = await c.env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(cred.user_id).first<UserRow>();
+  if (!user || user.status !== 'active') {
+    return c.json({ ok: false, error: { code: 'ACCOUNT_SUSPENDED', message: 'This account is suspended or deleted.' } }, 403);
+  }
+
+  const requireVerify = await isEmailVerificationRequired(c.env);
+  if (requireVerify && user.email_verified !== 1) {
+    return c.json(
+      { ok: false, error: { code: 'EMAIL_NOT_VERIFIED', message: 'Please verify your email address before signing in.' } },
+      403
+    );
+  }
+
+  const reqUrl = new URL(c.req.url);
+  try {
+    const check = await verifyAssertionResponse({
+      clientDataJSON: body.clientDataJSON,
+      authenticatorData: body.authenticatorData,
+      signature: body.signature,
+      expectedChallenge: challenge,
+      expectedOrigin: reqUrl.origin,
+      expectedRpId: reqUrl.hostname,
+      publicKeyJwkJson: cred.public_key_jwk,
+      alg: cred.alg,
+      previousSignCount: cred.sign_count,
+    });
+    if (!check.verified) {
+      return c.json({ ok: false, error: { code: 'PASSKEY_INVALID', message: 'Passkey signature verification failed.' } }, 401);
+    }
+
+    const now = nowSec();
+    await c.env.DB.prepare('UPDATE webauthn_credentials SET sign_count = ?, last_used_at = ? WHERE id = ?')
+      .bind(check.newSignCount, now, cred.id)
+      .run();
+  } catch {
+    return c.json({ ok: false, error: { code: 'PASSKEY_INVALID', message: 'Passkey verification failed.' } }, 401);
+  }
+
+  const session = await createSession(c, { userId: user.id });
+  await writeAuditLog(c.env.DB, {
+    actorId: user.id,
+    action: 'user.login_passkey',
+    targetType: 'user',
+    targetId: user.id,
+    ipHash: await getIpHash(c),
+  });
+
+  return c.json({
+    ok: true,
+    data: {
+      slot: session.slot,
+      userCount: session.userCount,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        developer_status: user.developer_status,
+      },
+    },
+  });
 });
 
 export default authRoutes;

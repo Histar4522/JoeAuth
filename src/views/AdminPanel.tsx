@@ -273,6 +273,18 @@ export const AdminPanel: FC<{
         </div>
       </section>
 
+      <section id="admin-user-inspector-card" class="card shadow-sm mb-4 hidden">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-center mb-3">
+            <h2 class="h5 fw-semibold mb-0" id="admin-user-inspector-title">
+              <i class="bi bi-person-badge me-2 text-primary"></i>User Inspector
+            </h2>
+            <button type="button" class="btn-close" id="close-user-inspector-btn" aria-label="Close"></button>
+          </div>
+          <div id="admin-user-inspector-body" class="small text-body-secondary">Loading...</div>
+        </div>
+      </section>
+
       <section class="card shadow-sm">
         <div class="card-body">
           <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
@@ -292,9 +304,16 @@ export const AdminPanel: FC<{
               <button type="submit" class="btn btn-sm btn-outline-secondary">
                 <i class="bi bi-funnel me-1"></i>Filter
               </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" data-export-audit="csv">
+                <i class="bi bi-filetype-csv me-1"></i>CSV
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" data-export-audit="json">
+                <i class="bi bi-filetype-json me-1"></i>JSON
+              </button>
             </form>
           </div>
           <div id="admin-audit-list" class="table-responsive text-body-secondary small">Loading audit logs...</div>
+          <div id="admin-audit-pagination" class="d-flex justify-content-between align-items-center flex-wrap gap-2 mt-3 small"></div>
         </div>
       </section>
     </Layout>

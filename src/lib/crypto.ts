@@ -77,7 +77,7 @@ export function timingSafeEqualHex(hexA: string, hexB: string): boolean {
   return timingSafeEqualBytes(a, b);
 }
 
-async function hmacSha256Hex(secret: string, message: string): Promise<string> {
+export async function hmacSha256Hex(secret: string, message: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     'raw',
     enc.encode(secret),
@@ -87,6 +87,57 @@ async function hmacSha256Hex(secret: string, message: string): Promise<string> {
   );
   const sig = await crypto.subtle.sign('HMAC', key, enc.encode(message));
   return bytesToHex(new Uint8Array(sig));
+}
+
+export function normalizeRecoveryCode(code: string): string {
+  return code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+const RECOVERY_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+
+export function generateRecoveryCodes(count = 8): string[] {
+  const codes: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const rand = crypto.getRandomValues(new Uint8Array(8));
+    let raw = '';
+    for (let j = 0; j < 8; j++) {
+      raw += RECOVERY_ALPHABET[rand[j] % RECOVERY_ALPHABET.length];
+    }
+    codes.push(`${raw.slice(0, 4)}-${raw.slice(4)}`);
+  }
+  return codes;
+}
+
+export async function signWebhookPayload(secret: string, timestamp: number, body: string): Promise<string> {
+  const sig = await hmacSha256Hex(secret, `${timestamp}.${body}`);
+  return `t=${timestamp},v1=${sig}`;
+}
+
+async function importAesKey(secret: string): Promise<CryptoKey> {
+  const digest = await crypto.subtle.digest('SHA-256', enc.encode(`joeauth-enc:${secret}`));
+  return crypto.subtle.importKey('raw', digest, 'AES-GCM', false, ['encrypt', 'decrypt']);
+}
+
+export async function encryptSecretValue(plaintext: string, masterSecret: string): Promise<string> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await importAesKey(masterSecret);
+  const cipherBuf = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(plaintext));
+  return `aesgcm$${bytesToHex(iv)}$${bytesToHex(new Uint8Array(cipherBuf))}`;
+}
+
+export async function decryptSecretValue(ciphertext: string, masterSecret: string): Promise<string | null> {
+  const parts = ciphertext.split('$');
+  if (parts.length !== 3 || parts[0] !== 'aesgcm') return null;
+  try {
+    const iv = hexToBytes(parts[1]);
+    const ct = hexToBytes(parts[2]);
+    if (iv.length !== 12 || ct.length === 0) return null;
+    const key = await importAesKey(masterSecret);
+    const plainBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
+    return dec.decode(plainBuf);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -131,6 +182,47 @@ export interface Ed25519Jwk extends JsonWebKey {
   use?: string;
 }
 
+function deriveKeyId(jwk: Ed25519Jwk): string {
+  return jwk.kid || (jwk.x ? `ed25519-${jwk.x.slice(0, 8)}` : 'joe-auth-ed25519');
+}
+
+function sanitizePublicJwk(jwk: Ed25519Jwk): Ed25519Jwk {
+  return {
+    kty: jwk.kty,
+    crv: jwk.crv,
+    x: jwk.x,
+    kid: deriveKeyId(jwk),
+    alg: 'EdDSA',
+    use: 'sig',
+  };
+}
+
+function parseConfiguredPublicJwks(env: Bindings): Ed25519Jwk[] {
+  const keys: Ed25519Jwk[] = [];
+  const pushFromJson = (rawJson: string | undefined) => {
+    if (!rawJson) return;
+    try {
+      const parsed = JSON.parse(rawJson) as Ed25519Jwk | Ed25519Jwk[];
+      const list = Array.isArray(parsed) ? parsed : [parsed];
+      for (const item of list) {
+        if (item && item.kty === 'OKP' && item.crv === 'Ed25519' && item.x) {
+          keys.push(sanitizePublicJwk(item));
+        }
+      }
+    } catch {}
+  };
+  pushFromJson(env.JWT_PUBLIC_JWK);
+  pushFromJson(env.JWT_PREVIOUS_PUBLIC_JWK);
+  // Deduplicate by kid
+  const seen = new Set<string>();
+  return keys.filter((k) => {
+    const id = k.kid || k.x;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
 export async function signEd25519Jwt(
   payload: Record<string, unknown>,
   privateJwkJson: string,
@@ -143,7 +235,7 @@ export async function signEd25519Jwt(
   const header = {
     alg: 'EdDSA',
     typ: 'JWT',
-    ...(jwk.kid ? { kid: jwk.kid } : {}),
+    kid: deriveKeyId(jwk),
   };
   const fullPayload = {
     iat: now,
@@ -160,15 +252,16 @@ export async function signEd25519Jwt(
   return `${signingInput}.${base64UrlEncode(signature)}`;
 }
 
-export async function verifyEd25519Jwt(
+async function verifyJwtWithKeys(
   token: string,
-  publicJwkJson: string
+  candidateKeys: Ed25519Jwk[],
+  opts: { ignoreExpiration?: boolean } = {}
 ): Promise<Record<string, unknown> | null> {
   const parts = token.split('.');
-  if (parts.length !== 3) return null;
+  if (parts.length !== 3 || candidateKeys.length === 0) return null;
 
   const [encodedHeader, encodedPayload, encodedSig] = parts;
-  let header: { alg?: string };
+  let header: { alg?: string; kid?: string };
   let payload: Record<string, unknown>;
 
   try {
@@ -180,47 +273,57 @@ export async function verifyEd25519Jwt(
 
   if (header.alg !== 'EdDSA') return null;
 
-  try {
-    const jwk = JSON.parse(publicJwkJson) as Ed25519Jwk;
-    const key = await crypto.subtle.importKey('jwk', jwk, { name: 'Ed25519' }, false, ['verify']);
-    const sigBytes = base64UrlDecode(encodedSig);
-    const valid = await crypto.subtle.verify(
-      'Ed25519',
-      key,
-      sigBytes,
-      enc.encode(`${encodedHeader}.${encodedPayload}`)
-    );
-    if (!valid) return null;
-  } catch {
-    return null;
+  const orderedKeys = header.kid
+    ? [
+        ...candidateKeys.filter((k) => k.kid === header.kid),
+        ...candidateKeys.filter((k) => k.kid !== header.kid),
+      ]
+    : candidateKeys;
+
+  const sigBytes = base64UrlDecode(encodedSig);
+  const inputBytes = enc.encode(`${encodedHeader}.${encodedPayload}`);
+  let verified = false;
+  for (const jwk of orderedKeys) {
+    try {
+      const key = await crypto.subtle.importKey('jwk', jwk, { name: 'Ed25519' }, false, ['verify']);
+      if (await crypto.subtle.verify('Ed25519', key, sigBytes, inputBytes)) {
+        verified = true;
+        break;
+      }
+    } catch {}
   }
+  if (!verified) return null;
 
   const now = nowSec();
-  if (typeof payload.exp === 'number' && payload.exp < now) return null;
+  if (!opts.ignoreExpiration && typeof payload.exp === 'number' && payload.exp < now) return null;
   if (typeof payload.nbf === 'number' && payload.nbf > now) return null;
   return payload;
 }
 
+export async function verifyEd25519Jwt(
+  token: string,
+  publicJwkJson: string,
+  opts: { ignoreExpiration?: boolean } = {}
+): Promise<Record<string, unknown> | null> {
+  try {
+    const parsed = JSON.parse(publicJwkJson) as Ed25519Jwk | Ed25519Jwk[];
+    const keys = (Array.isArray(parsed) ? parsed : [parsed]).map(sanitizePublicJwk);
+    return verifyJwtWithKeys(token, keys, opts);
+  } catch {
+    return null;
+  }
+}
+
+export async function verifyEd25519JwtWithEnv(
+  token: string,
+  env: Bindings,
+  opts: { ignoreExpiration?: boolean } = {}
+): Promise<Record<string, unknown> | null> {
+  return verifyJwtWithKeys(token, parseConfiguredPublicJwks(env), opts);
+}
+
 export async function getPublicJwks(env: Bindings): Promise<{ keys: Ed25519Jwk[] }> {
-  const cached = await env.AUTH_CACHE.get('jwks:public', 'json').catch(() => null);
-  if (cached && typeof cached === 'object' && 'keys' in cached) {
-    return cached as { keys: Ed25519Jwk[] };
-  }
-  if (!env.JWT_PUBLIC_JWK) {
-    return { keys: [] };
-  }
-  const jwk = JSON.parse(env.JWT_PUBLIC_JWK) as Ed25519Jwk;
-  const sanitized: Ed25519Jwk = {
-    kty: jwk.kty,
-    crv: jwk.crv,
-    x: jwk.x,
-    kid: jwk.kid || 'joe-auth-ed25519',
-    alg: 'EdDSA',
-    use: 'sig',
-  };
-  const jwks = { keys: [sanitized] };
-  await env.AUTH_CACHE.put('jwks:public', JSON.stringify(jwks), { expirationTtl: 3600 }).catch(() => {});
-  return jwks;
+  return { keys: parseConfiguredPublicJwks(env) };
 }
 
 // --- TOTP (RFC 6238 HMAC-SHA1, zero dependencies) ---

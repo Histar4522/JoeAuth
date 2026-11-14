@@ -1,7 +1,14 @@
 import { Hono } from 'hono';
 import type { AppEnv, DeveloperApplicationRow, RegistrationRuleRow, UserRow } from '../types';
 import { hashPassword, nowSec, verifySuperuserPassword } from '../lib/crypto';
-import { createSession, deleteUserAccountData, getIpHash, getPepper, getSystemSetting } from '../lib/session';
+import {
+  createSession,
+  deleteUserAccountData,
+  getIpHash,
+  getPepper,
+  getSystemSetting,
+  parseUserAgentSummary,
+} from '../lib/session';
 import {
   REGISTRATION_RULE_TEMPLATES,
   evaluateRegistrationEmail,
@@ -11,6 +18,7 @@ import {
 import { verifyTurnstile } from '../lib/turnstile';
 import { getAppLogoUrl, getUserAvatarUrl } from '../lib/images';
 import { writeAuditLog } from '../lib/audit';
+import { dispatchAppWebhooks } from '../lib/webhooks';
 import { requireAdmin, requireCsrf, requireSuperuser } from '../middleware/auth';
 import { rateLimitMiddleware } from '../middleware/rateLimit';
 
@@ -224,6 +232,11 @@ adminRoutes.patch('/users/:id/status', requireCsrf, async (c) => {
   if (nextStatus === 'suspended') {
     stmts.push(c.env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(targetId));
     stmts.push(c.env.DB.prepare('UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ?').bind(targetId));
+    await dispatchAppWebhooks(c.env, c.executionCtx, {
+      event: 'user.suspended',
+      userId: targetId,
+      data: { user_id: targetId },
+    });
   }
   await c.env.DB.batch(stmts);
 
@@ -394,9 +407,13 @@ adminRoutes.delete('/users/:id/2fa', requireCsrf, async (c) => {
     );
   }
 
-  await c.env.DB.prepare('UPDATE users SET totp_enabled = 0, totp_secret = NULL, updated_at = ? WHERE id = ?')
-    .bind(nowSec(), targetId)
-    .run();
+  await c.env.DB.batch([
+    c.env.DB.prepare('UPDATE users SET totp_enabled = 0, totp_secret = NULL, updated_at = ? WHERE id = ?').bind(
+      nowSec(),
+      targetId
+    ),
+    c.env.DB.prepare('DELETE FROM user_recovery_codes WHERE user_id = ?').bind(targetId),
+  ]);
 
   await writeAuditLog(c.env.DB, {
     actorId: actorIdOf(c),
@@ -407,6 +424,81 @@ adminRoutes.delete('/users/:id/2fa', requireCsrf, async (c) => {
   });
 
   return c.json({ ok: true, data: { totpEnabled: false } });
+});
+
+adminRoutes.get('/users/:id/details', async (c) => {
+  const targetId = c.req.param('id');
+  const row = await c.env.DB.prepare(
+    `SELECT id, email, name, role, developer_status, status, email_verified, totp_enabled, avatar_color, avatar_key, avatar_version, created_at, updated_at
+     FROM users WHERE id = ?`
+  )
+    .bind(targetId)
+    .first<Omit<UserRow, 'password_hash' | 'totp_secret'>>();
+
+  if (!row) {
+    return c.json({ ok: false, error: { code: 'NOT_FOUND', message: 'User not found.' } }, 404);
+  }
+
+  const now = nowSec();
+  const [sessionsRes, consentsRes, ownedAppsRes, passkeysRes, logsRes] = await Promise.all([
+    c.env.DB.prepare(
+      'SELECT id, ip_hash, user_agent, auth_time, created_at, last_seen_at, expires_at FROM sessions WHERE user_id = ? AND expires_at > ? ORDER BY last_seen_at DESC'
+    )
+      .bind(targetId, now)
+      .all<{
+        id: string;
+        ip_hash: string | null;
+        user_agent: string | null;
+        auth_time: number;
+        created_at: number;
+        last_seen_at: number;
+        expires_at: number;
+      }>(),
+    c.env.DB.prepare(
+      `SELECT uc.app_id, uc.scopes, uc.granted_at, a.name, a.client_id, a.homepage_url
+       FROM user_consents uc
+       JOIN apps a ON a.id = uc.app_id
+       WHERE uc.user_id = ?
+       ORDER BY uc.granted_at DESC`
+    )
+      .bind(targetId)
+      .all(),
+    c.env.DB.prepare(
+      'SELECT id, name, client_id, client_type, status, created_at FROM apps WHERE owner_user_id = ? ORDER BY created_at DESC'
+    )
+      .bind(targetId)
+      .all(),
+    c.env.DB.prepare(
+      'SELECT id, label AS name, created_at, last_used_at FROM webauthn_credentials WHERE user_id = ? ORDER BY created_at DESC'
+    )
+      .bind(targetId)
+      .all(),
+    c.env.DB.prepare(
+      'SELECT id, actor_id, action, target_type, target_id, metadata, created_at FROM audit_logs WHERE actor_id = ? OR target_id = ? ORDER BY created_at DESC LIMIT 30'
+    )
+      .bind(targetId, targetId)
+      .all(),
+  ]);
+
+  const { avatar_key, ...userPublic } = row;
+  return c.json({
+    ok: true,
+    data: {
+      user: {
+        ...userPublic,
+        has_custom_avatar: Boolean(avatar_key),
+        avatar_url: getUserAvatarUrl('', row.id, row.avatar_version),
+      },
+      sessions: (sessionsRes.results || []).map((s) => ({
+        ...s,
+        device_label: parseUserAgentSummary(s.user_agent),
+      })),
+      consents: consentsRes.results || [],
+      ownedApps: ownedAppsRes.results || [],
+      passkeys: passkeysRes.results || [],
+      auditLogs: logsRes.results || [],
+    },
+  });
 });
 
 adminRoutes.delete('/users/:id', requireCsrf, async (c) => {
@@ -432,6 +524,12 @@ adminRoutes.delete('/users/:id', requireCsrf, async (c) => {
       403
     );
   }
+
+  await dispatchAppWebhooks(c.env, c.executionCtx, {
+    event: 'user.deleted',
+    userId: target.id,
+    data: { user_id: target.id },
+  });
 
   await deleteUserAccountData(c.env.DB, c.env.MEDIA_BUCKET, target.id, target.avatar_key);
 
@@ -762,9 +860,68 @@ function auditCategoryWhere(category: string, now: number): { sql: string; binds
   }
 }
 
+function escapeCsvField(raw: unknown): string {
+  const str = raw === null || raw === undefined ? '' : String(raw);
+  const safe = /^[=+\-@\t\r]/.test(str) ? `'${str}` : str;
+  if (/[",\r\n]/.test(safe)) {
+    return `"${safe.replace(/"/g, '""')}"`;
+  }
+  return safe;
+}
+
 adminRoutes.get('/audit-logs', async (c) => {
   const category = (c.req.query('category') || 'all').trim();
   const q = (c.req.query('q') || '').trim();
+  const pageRaw = Number(c.req.query('page') || '1');
+  const limitRaw = Number(c.req.query('limit') || '25');
+  const page = Number.isFinite(pageRaw) && pageRaw >= 1 ? Math.floor(pageRaw) : 1;
+  const limit = Number.isFinite(limitRaw) && limitRaw >= 1 && limitRaw <= 100 ? Math.floor(limitRaw) : 25;
+
+  const cat = auditCategoryWhere(category, nowSec());
+  if (!cat || category === 'older_than_30d') {
+    return c.json({ ok: false, error: { code: 'INVALID_CATEGORY', message: 'Invalid audit log category.' } }, 400);
+  }
+
+  const like = `%${q}%`;
+  const clauses = [cat.sql, "(? = '' OR action LIKE ? OR COALESCE(actor_id, '') LIKE ? OR COALESCE(target_id, '') LIKE ? OR COALESCE(metadata, '') LIKE ?)"];
+  const binds: (string | number)[] = [...cat.binds, q, like, like, like, like];
+  const whereSql = clauses.join(' AND ');
+
+  const countRow = await c.env.DB.prepare(`SELECT COUNT(*) AS count FROM audit_logs WHERE ${whereSql}`)
+    .bind(...binds)
+    .first<{ count: number }>();
+  const total = countRow?.count ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  const safePage = Math.min(page, totalPages);
+  const offset = (safePage - 1) * limit;
+
+  const { results } = await c.env.DB.prepare(
+    `SELECT * FROM audit_logs WHERE ${whereSql} ORDER BY created_at DESC LIMIT ? OFFSET ?`
+  )
+    .bind(...binds, limit, offset)
+    .all();
+
+  return c.json({
+    ok: true,
+    data: {
+      logs: results || [],
+      total,
+      page: safePage,
+      limit,
+      totalPages,
+    },
+  });
+});
+
+adminRoutes.get('/audit-logs/export', async (c) => {
+  const category = (c.req.query('category') || 'all').trim();
+  const q = (c.req.query('q') || '').trim();
+  const format = (c.req.query('format') || 'json').trim().toLowerCase();
+
+  if (format !== 'csv' && format !== 'json') {
+    return c.json({ ok: false, error: { code: 'INVALID_FORMAT', message: 'Export format must be csv or json.' } }, 400);
+  }
+
   const cat = auditCategoryWhere(category, nowSec());
   if (!cat || category === 'older_than_30d') {
     return c.json({ ok: false, error: { code: 'INVALID_CATEGORY', message: 'Invalid audit log category.' } }, 400);
@@ -775,11 +932,38 @@ adminRoutes.get('/audit-logs', async (c) => {
   const binds: (string | number)[] = [...cat.binds, q, like, like, like, like];
 
   const { results } = await c.env.DB.prepare(
-    `SELECT * FROM audit_logs WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC LIMIT 100`
+    `SELECT id, actor_id, action, target_type, target_id, ip_hash, metadata, created_at FROM audit_logs WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC LIMIT 2000`
   )
     .bind(...binds)
-    .all();
-  return c.json({ ok: true, data: results || [] });
+    .all<{
+      id: string;
+      actor_id: string | null;
+      action: string;
+      target_type: string | null;
+      target_id: string | null;
+      ip_hash: string | null;
+      metadata: string | null;
+      created_at: number;
+    }>();
+
+  const rows = results || [];
+  c.header('Cache-Control', 'no-store');
+
+  if (format === 'csv') {
+    const header = 'id,actor_id,action,target_type,target_id,ip_hash,metadata,created_at';
+    const lines = rows.map((r) =>
+      [r.id, r.actor_id, r.action, r.target_type, r.target_id, r.ip_hash, r.metadata, r.created_at]
+        .map(escapeCsvField)
+        .join(',')
+    );
+    c.header('Content-Type', 'text/csv; charset=utf-8');
+    c.header('Content-Disposition', 'attachment; filename="audit-logs.csv"');
+    return c.body([header, ...lines].join('\r\n'));
+  }
+
+  c.header('Content-Type', 'application/json; charset=utf-8');
+  c.header('Content-Disposition', 'attachment; filename="audit-logs.json"');
+  return c.body(JSON.stringify(rows, null, 2));
 });
 
 adminRoutes.post('/audit-logs/purge', requireCsrf, async (c) => {
@@ -816,7 +1000,9 @@ adminRoutes.post('/maintenance/purge', requireCsrf, async (c) => {
     expired_sessions: () => c.env.DB.prepare('DELETE FROM sessions WHERE expires_at < ?').bind(now),
     expired_tokens: () => c.env.DB.prepare('DELETE FROM verification_tokens WHERE expires_at < ?').bind(now),
     expired_oauth_codes: () => c.env.DB.prepare('DELETE FROM oauth_codes WHERE expires_at < ? OR used = 1').bind(now),
+    expired_device_codes: () => c.env.DB.prepare('DELETE FROM device_codes WHERE expires_at < ?').bind(now),
     revoked_refresh_tokens: () => c.env.DB.prepare('DELETE FROM refresh_tokens WHERE revoked = 1 OR expires_at < ?').bind(now),
+    old_oauth_errors: () => c.env.DB.prepare('DELETE FROM oauth_error_logs WHERE created_at < ?').bind(now - 14 * 86400),
   };
 
   let deleted = 0;

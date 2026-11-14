@@ -2,7 +2,8 @@
 import type { D1Migration } from '@cloudflare/vitest-pool-workers';
 import { applyD1Migrations, env, SELF } from 'cloudflare:test';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
-import { sha256Base64Url, verifyEd25519Jwt } from '../src/lib/crypto';
+import { hmacSha256Hex, sha256Base64Url, verifyEd25519Jwt } from '../src/lib/crypto';
+import { fromBase64Url, toBase64Url } from '../src/lib/webauthn';
 import { runDailyCleanup } from '../src/index';
 import type { Bindings } from '../src/types';
 
@@ -82,6 +83,9 @@ function makeTestPng(width: number, height: number, size = 64): Uint8Array {
   return buf;
 }
 
+const emailDispatchLog: Array<{ url: string }> = [];
+const webhookDispatchLog: Array<{ url: string; event: string | null; signature: string | null; body: string }> = [];
+
 describe('JoeAuth End-to-End Workers Flow', () => {
   beforeAll(async () => {
     await applyD1Migrations(testEnv.DB, testEnv.TEST_MIGRATIONS);
@@ -95,10 +99,22 @@ describe('JoeAuth End-to-End Workers Flow', () => {
         });
       }
       if (url.startsWith('https://api.resend.com/emails')) {
+        emailDispatchLog.push({ url });
         return new Response(JSON.stringify({ id: 'mock-email-id' }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
+      }
+      if (url.startsWith('https://hooks.example.com/')) {
+        const hdrs = input instanceof Request ? input.headers : new Headers(init?.headers);
+        const body = input instanceof Request ? await input.clone().text() : String(init?.body || '');
+        webhookDispatchLog.push({
+          url,
+          event: hdrs.get('X-JoeAuth-Event'),
+          signature: hdrs.get('X-JoeAuth-Signature'),
+          body,
+        });
+        return new Response(JSON.stringify({ received: true }), { status: 200 });
       }
       return origFetch(input as RequestInfo, init);
     });
@@ -107,14 +123,25 @@ describe('JoeAuth End-to-End Workers Flow', () => {
   it('exposes OIDC discovery & Ed25519 JWKS', async () => {
     const disc = await SELF.fetch('http://localhost/.well-known/openid-configuration');
     expect(disc.status).toBe(200);
-    const discJson = (await disc.json()) as { id_token_signing_alg_values_supported: string[] };
+    const discJson = (await disc.json()) as {
+      id_token_signing_alg_values_supported: string[];
+      device_authorization_endpoint: string;
+      end_session_endpoint: string;
+      grant_types_supported: string[];
+      claims_supported: string[];
+    };
     expect(discJson.id_token_signing_alg_values_supported).toContain('EdDSA');
+    expect(discJson.device_authorization_endpoint).toContain('/api/oauth/device_code');
+    expect(discJson.end_session_endpoint).toContain('/oauth/logout');
+    expect(discJson.grant_types_supported).toContain('urn:ietf:params:oauth:grant-type:device_code');
+    expect(discJson.claims_supported).toContain('auth_time');
 
     const jwksResp = await SELF.fetch('http://localhost/.well-known/jwks.json');
     expect(jwksResp.status).toBe(200);
-    const jwks = (await jwksResp.json()) as { keys: Array<{ crv: string; alg: string }> };
+    const jwks = (await jwksResp.json()) as { keys: Array<{ crv: string; alg: string; kid?: string }> };
     expect(jwks.keys[0].crv).toBe('Ed25519');
     expect(jwks.keys[0].alg).toBe('EdDSA');
+    expect(jwks.keys[0].kid).toBeTruthy();
   });
 
   it('enforces approve-nothing registration, developer gating, admin roles, and full PKCE OAuth flow', async () => {
@@ -843,9 +870,9 @@ describe('JoeAuth End-to-End Workers Flow', () => {
     // Audit log category filter & categorized log purge + maintenance purge
     const failureLogsBefore = (
       (await (await req('/api/admin/audit-logs?category=auth_failures', adminJar)).json()) as {
-        data: unknown[];
+        data: { logs: unknown[]; total: number; page: number; totalPages: number };
       }
-    ).data;
+    ).data.logs;
     expect(failureLogsBefore.length).toBeGreaterThan(0);
 
     const purgeFailures = await req('/api/admin/audit-logs/purge', adminJar, {
@@ -857,9 +884,9 @@ describe('JoeAuth End-to-End Workers Flow', () => {
 
     const failureLogsAfter = (
       (await (await req('/api/admin/audit-logs?category=auth_failures', adminJar)).json()) as {
-        data: unknown[];
+        data: { logs: unknown[]; total: number };
       }
-    ).data;
+    ).data.logs;
     expect(failureLogsAfter.length).toBe(0);
 
     const maintPurge = await req('/api/admin/maintenance/purge', adminJar, {
@@ -876,17 +903,493 @@ describe('JoeAuth End-to-End Workers Flow', () => {
     expect(overviewAfter.maintenance.authFailureLogs).toBe(0);
     expect(overviewAfter.maintenance.auditLogsTotal).toBeGreaterThan(0);
 
-    // 9. Root redirects to /login when unauthenticated; auth & doc pages render cleanly
+    // 9. Root redirects to /login when unauthenticated; auth pages render cleanly and /docs is removed
     const rootResp = await SELF.fetch('http://localhost/', { redirect: 'manual' });
     expect(rootResp.status).toBe(302);
     expect(rootResp.headers.get('location')).toBe('/login');
 
-    for (const p of ['/login', '/register', '/docs', '/admin/login']) {
+    for (const p of ['/login', '/register', '/admin/login']) {
       const pageResp = await SELF.fetch(`http://localhost${p}`);
       expect(pageResp.status).toBe(200);
     }
+    const docsResp = await SELF.fetch('http://localhost/docs');
+    expect(docsResp.status).toBe(404);
 
     // 10. Cron daily cleanup runs cleanly
     await expect(runDailyCleanup(env as unknown as Parameters<typeof runDailyCleanup>[0])).resolves.toBeUndefined();
+  });
+
+  it('supports public PKCE apps, prompt/max_age, device grant, RP logout, recovery codes, passkeys, webhooks & admin inspection/export', async () => {
+    const superJar = new CookieJar();
+    const suLogin = await req('/api/admin/superuser/login', superJar, {
+      method: 'POST',
+      body: { password: 'test-superuser-pass', turnstileToken: 'test-token' },
+    });
+    expect(suLogin.status).toBe(200);
+
+    // Register & grant developer privilege to Sam
+    const samJar = new CookieJar();
+    const regSam = await req('/api/auth/register', samJar, {
+      method: 'POST',
+      body: { name: 'Sam Developer', email: 'sam@example.com', password: 'SamPassword123!', turnstileToken: 'test-token' },
+    });
+    expect(regSam.status).toBe(201);
+    const samId = ((await regSam.json()) as { data: { user: { id: string } } }).data.user.id;
+
+    expect(
+      (
+        await req(`/api/admin/users/${samId}/developer-status`, superJar, {
+          method: 'PATCH',
+          body: { developerStatus: 'approved' },
+        })
+      ).status
+    ).toBe(200);
+
+    // 1. Public OAuth Client creation + post_logout_redirect_uris + webhooks
+    const createPubApp = await req('/api/dev/apps', samJar, {
+      method: 'POST',
+      body: {
+        name: 'Sam Public SPA',
+        clientType: 'public',
+        homepageUrl: 'https://spa.example.com',
+        redirectUris: ['https://spa.example.com/cb'],
+        postLogoutRedirectUris: ['https://spa.example.com/signed-out'],
+        webhookUrl: 'https://hooks.example.com/joeauth',
+        allowedScopes: ['openid', 'profile', 'email', 'offline_access'],
+      },
+    });
+    expect(createPubApp.status).toBe(201);
+    const pubApp = ((await createPubApp.json()) as {
+      data: { id: string; client_id: string; client_secret: string | null; client_type: string; webhook_secret: string };
+    }).data;
+    expect(pubApp.client_type).toBe('public');
+    expect(pubApp.client_secret).toBeNull();
+    expect(pubApp.webhook_secret.startsWith('whsec_')).toBe(true);
+
+    // Public client cannot rotate client_secret or use client_credentials
+    expect(
+      (
+        await req(`/api/dev/apps/${pubApp.id}/rotate-secret`, samJar, {
+          method: 'POST',
+          body: { currentPassword: 'SamPassword123!' },
+        })
+      ).status
+    ).toBe(400);
+    const badM2m = await SELF.fetch('http://localhost/api/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ grant_type: 'client_credentials', client_id: pubApp.client_id }).toString(),
+    });
+    expect(badM2m.status).toBe(400);
+
+    // Public client missing PKCE on /oauth/authorize -> error redirect + error recorded in /api/dev/apps/:id/logs
+    const missingPkce = await req(
+      `/oauth/authorize?client_id=${encodeURIComponent(pubApp.client_id)}&redirect_uri=${encodeURIComponent(
+        'https://spa.example.com/cb'
+      )}&response_type=code&state=s1`,
+      samJar
+    );
+    expect(missingPkce.status).toBe(302);
+    expect(missingPkce.headers.get('location')).toContain('error=invalid_request');
+
+    const devLogsResp = await req(`/api/dev/apps/${pubApp.id}/logs`, samJar);
+    expect(devLogsResp.status).toBe(200);
+    const devLogs = ((await devLogsResp.json()) as { data: Array<{ error_code: string }> }).data;
+    expect(devLogs.some((l) => l.error_code === 'invalid_request')).toBe(true);
+
+    // 2. OIDC prompt=none unauthenticated & unconsented -> consent -> prompt=none silent code -> PKCE exchange without secret
+    const pubVerifier = 'public_pkce_verifier_entropy_987654321';
+    const pubChallenge = await sha256Base64Url(pubVerifier);
+
+    const promptNoneLoggedOut = await SELF.fetch(
+      `http://localhost/oauth/authorize?client_id=${encodeURIComponent(pubApp.client_id)}&redirect_uri=${encodeURIComponent(
+        'https://spa.example.com/cb'
+      )}&code_challenge=${encodeURIComponent(pubChallenge)}&code_challenge_method=S256&prompt=none&state=st1`,
+      { redirect: 'manual' }
+    );
+    expect(promptNoneLoggedOut.status).toBe(302);
+    expect(promptNoneLoggedOut.headers.get('location')).toContain('error=login_required');
+
+    const promptNoneNoConsent = await req(
+      `/oauth/authorize?client_id=${encodeURIComponent(pubApp.client_id)}&redirect_uri=${encodeURIComponent(
+        'https://spa.example.com/cb'
+      )}&code_challenge=${encodeURIComponent(pubChallenge)}&code_challenge_method=S256&prompt=none&state=st2`,
+      samJar
+    );
+    expect(promptNoneNoConsent.status).toBe(302);
+    expect(promptNoneNoConsent.headers.get('location')).toContain('error=consent_required');
+
+    // Grant consent via POST /oauth/authorize
+    const grantConsent = await req('/oauth/authorize', samJar, {
+      method: 'POST',
+      form: new URLSearchParams({
+        _csrf: samJar.csrf(),
+        client_id: pubApp.client_id,
+        redirect_uri: 'https://spa.example.com/cb',
+        scope: 'openid profile email',
+        state: 'st3',
+        code_challenge: pubChallenge,
+        code_challenge_method: 'S256',
+        decision: 'allow',
+      }),
+    });
+    expect(grantConsent.status).toBe(302);
+
+    // Now prompt=none succeeds silently with a fresh code!
+    const silentSuccess = await req(
+      `/oauth/authorize?client_id=${encodeURIComponent(pubApp.client_id)}&redirect_uri=${encodeURIComponent(
+        'https://spa.example.com/cb'
+      )}&code_challenge=${encodeURIComponent(pubChallenge)}&code_challenge_method=S256&prompt=none&state=st4`,
+      samJar
+    );
+    expect(silentSuccess.status).toBe(302);
+    const silentLoc = new URL(silentSuccess.headers.get('location')!);
+    const silentCode = silentLoc.searchParams.get('code')!;
+    expect(silentCode).toBeTruthy();
+
+    // prompt=login & max_age=0 redirects to login with login_hint
+    const promptLoginResp = await req(
+      `/oauth/authorize?client_id=${encodeURIComponent(pubApp.client_id)}&redirect_uri=${encodeURIComponent(
+        'https://spa.example.com/cb'
+      )}&code_challenge=${encodeURIComponent(pubChallenge)}&code_challenge_method=S256&prompt=login&login_hint=sam%40example.com`,
+      samJar
+    );
+    expect(promptLoginResp.status).toBe(302);
+    expect(promptLoginResp.headers.get('location')).toContain('login_hint=sam%40example.com');
+
+    // Exchange public code WITHOUT client_secret
+    const pubTokenResp = await SELF.fetch('http://localhost/api/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: pubApp.client_id,
+        code: silentCode,
+        redirect_uri: 'https://spa.example.com/cb',
+        code_verifier: pubVerifier,
+      }).toString(),
+    });
+    expect(pubTokenResp.status).toBe(200);
+    const pubTokens = (await pubTokenResp.json()) as { access_token: string; id_token: string };
+    const idClaims = await verifyEd25519Jwt(pubTokens.id_token, testEnv.JWT_PUBLIC_JWK!);
+    expect(idClaims?.sub).toBe(samId);
+    expect(typeof idClaims?.auth_time).toBe('number');
+
+    // 3. Device Authorization Grant (RFC 8628)
+    const devStartResp = await SELF.fetch('http://localhost/api/oauth/device_code', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ client_id: pubApp.client_id, scope: 'openid profile' }).toString(),
+    });
+    expect(devStartResp.status).toBe(200);
+    const devStart = (await devStartResp.json()) as {
+      device_code: string;
+      user_code: string;
+      verification_uri: string;
+    };
+    expect(devStart.user_code).toMatch(/^[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+
+    const pollPending = await SELF.fetch('http://localhost/api/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+        client_id: pubApp.client_id,
+        device_code: devStart.device_code,
+      }).toString(),
+    });
+    expect(pollPending.status).toBe(400);
+    expect(((await pollPending.json()) as { error: string }).error).toBe('authorization_pending');
+
+    const devicePage = await req(`/device?user_code=${encodeURIComponent(devStart.user_code)}`, samJar);
+    expect(devicePage.status).toBe(200);
+    expect(await devicePage.text()).toContain(devStart.user_code);
+
+    const approveDevice = await req('/api/oauth/device/approve', samJar, {
+      method: 'POST',
+      body: { userCode: devStart.user_code, decision: 'allow' },
+    });
+    expect(approveDevice.status).toBe(200);
+
+    // Wait interval=5s check? Note: if last_poll_at was just set to current second, backdate last_poll_at in D1 by 6s to simulate interval wait!
+    await testEnv.DB.prepare('UPDATE device_codes SET last_poll_at = last_poll_at - 6 WHERE user_code = ?')
+      .bind(devStart.user_code)
+      .run();
+
+    const pollApproved = await SELF.fetch('http://localhost/api/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+        client_id: pubApp.client_id,
+        device_code: devStart.device_code,
+      }).toString(),
+    });
+    expect(pollApproved.status).toBe(200);
+    expect(((await pollApproved.json()) as { id_token: string }).id_token).toBeTruthy();
+
+    // 4. Webhooks: Test webhook + consent.revoked signed HMAC delivery
+    const whTest = await req(`/api/dev/apps/${pubApp.id}/webhook-test`, samJar, { method: 'POST', body: {} });
+    expect(whTest.status).toBe(200);
+    expect(((await whTest.json()) as { data: { delivered: boolean } }).data.delivered).toBe(true);
+    const lastWh = webhookDispatchLog[webhookDispatchLog.length - 1];
+    expect(lastWh?.event).toBe('webhook.test');
+    const parts = Object.fromEntries((lastWh.signature || '').split(',').map((p) => p.split('=')));
+    const expectedHmac = await hmacSha256Hex(pubApp.webhook_secret, `${parts.t}.${lastWh.body}`);
+    expect(parts.v1).toBe(expectedHmac);
+
+    const revokeConsent = await req(`/api/user/apps/${pubApp.id}`, samJar, { method: 'DELETE', body: {} });
+    expect(revokeConsent.status).toBe(200);
+    expect(webhookDispatchLog.some((w) => w.event === 'consent.revoked')).toBe(true);
+
+    // 5. 2FA Setup + Backup Recovery Codes + Login with Recovery Code + Brute-Force Lockout + Email Cooldown
+    const totpSetup = await req('/api/user/2fa/setup', samJar, { method: 'POST', body: {} });
+    expect(totpSetup.status).toBe(200);
+    const totpSecret = ((await totpSetup.json()) as { data: { secret: string } }).data.secret;
+
+    // Generate live TOTP code using SubtleCrypto
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    let bits = '';
+    for (const ch of totpSecret) {
+      const idx = alphabet.indexOf(ch);
+      if (idx >= 0) bits += idx.toString(2).padStart(5, '0');
+    }
+    const keyBytes = new Uint8Array(Math.floor(bits.length / 8));
+    for (let i = 0; i < keyBytes.length; i++) keyBytes[i] = parseInt(bits.slice(i * 8, i * 8 + 8), 2);
+    const totpKey = await crypto.subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']);
+    const counterBuf = new ArrayBuffer(8);
+    new DataView(counterBuf).setUint32(4, Math.floor(Date.now() / 1000 / 30), false);
+    const hmac = new Uint8Array(await crypto.subtle.sign('HMAC', totpKey, counterBuf));
+    const offset = hmac[hmac.length - 1] & 0x0f;
+    const bin =
+      ((hmac[offset] & 0x7f) << 24) |
+      ((hmac[offset + 1] & 0xff) << 16) |
+      ((hmac[offset + 2] & 0xff) << 8) |
+      (hmac[offset + 3] & 0xff);
+    const totpCode = String(bin % 1_000_000).padStart(6, '0');
+
+    const totpVerify = await req('/api/user/2fa/verify', samJar, { method: 'POST', body: { code: totpCode } });
+    expect(totpVerify.status).toBe(200);
+    const recCodes = ((await totpVerify.json()) as { data: { recoveryCodes: string[] } }).data.recoveryCodes;
+    expect(recCodes).toHaveLength(8);
+
+    // Sign in with recovery code in a fresh jar -> succeeds once, fails on reuse!
+    const samRecJar = new CookieJar();
+    const recLoginOk = await req('/api/auth/login', samRecJar, {
+      method: 'POST',
+      body: {
+        email: 'sam@example.com',
+        password: 'SamPassword123!',
+        recoveryCode: recCodes[0],
+        turnstileToken: 'test-token',
+      },
+    });
+    expect(recLoginOk.status).toBe(200);
+
+    const recReuseFail = await req('/api/auth/login', new CookieJar(), {
+      method: 'POST',
+      body: {
+        email: 'sam@example.com',
+        password: 'SamPassword123!',
+        recoveryCode: recCodes[0],
+        turnstileToken: 'test-token',
+      },
+    });
+    expect(recReuseFail.status).toBe(401);
+
+    // 6. Active Sessions device_label + Passkey Registration & Sign-In
+    const sessionsResp = await req('/api/user/sessions', samJar, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36' },
+    });
+    expect(sessionsResp.status).toBe(200);
+    const sessionsData = ((await sessionsResp.json()) as { data: Array<{ device_label: string }> }).data;
+    expect(sessionsData.length).toBeGreaterThanOrEqual(2);
+    expect(sessionsData[0].device_label).toBeTruthy();
+
+    // Passkey registration & login via virtual P-256 WebAuthn authenticator
+    const pkRegOptsResp = await req('/api/user/passkeys/register/options', samJar, { method: 'POST', body: {} });
+    expect(pkRegOptsResp.status).toBe(200);
+    const pkRegOpts = ((await pkRegOptsResp.json()) as { data: { challengeId: string; options: { challenge: string } } }).data;
+
+    const pkKp = (await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, [
+      'sign',
+      'verify',
+    ])) as CryptoKeyPair;
+    const pkPubJwk = (await crypto.subtle.exportKey('jwk', pkKp.publicKey)) as JsonWebKey;
+    const pkCredId = crypto.getRandomValues(new Uint8Array(24));
+    const rpHash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('localhost')));
+    const encodeCborSimple = (v: unknown): Uint8Array => {
+      const cu = (m: number, n: number) =>
+        n < 24 ? [(m << 5) | n] : n < 256 ? [(m << 5) | 24, n] : [(m << 5) | 25, (n >> 8) & 0xff, n & 0xff];
+      if (typeof v === 'number') return new Uint8Array(v >= 0 ? cu(0, v) : cu(1, -1 - v));
+      if (typeof v === 'string') {
+        const b = new TextEncoder().encode(v);
+        return new Uint8Array([...cu(3, b.length), ...b]);
+      }
+      if (v instanceof Uint8Array) return new Uint8Array([...cu(2, v.length), ...v]);
+      if (v instanceof Map) {
+        const parts: number[] = [...cu(5, v.size)];
+        for (const [k, val] of v.entries()) parts.push(...encodeCborSimple(k), ...encodeCborSimple(val));
+        return new Uint8Array(parts);
+      }
+      throw new Error('unsupported');
+    };
+    const cosePub = encodeCborSimple(
+      new Map<unknown, unknown>([
+        [1, 2],
+        [3, -7],
+        [-1, 1],
+        [-2, fromBase64Url(pkPubJwk.x!)],
+        [-3, fromBase64Url(pkPubJwk.y!)],
+      ])
+    );
+    const pkAuthData = new Uint8Array(37 + 16 + 2 + pkCredId.length + cosePub.length);
+    pkAuthData.set(rpHash, 0);
+    pkAuthData[32] = 0x45;
+    new DataView(pkAuthData.buffer).setUint32(33, 1, false);
+    new DataView(pkAuthData.buffer).setUint16(53, pkCredId.length, false);
+    pkAuthData.set(pkCredId, 55);
+    pkAuthData.set(cosePub, 55 + pkCredId.length);
+    const pkAtt = encodeCborSimple(
+      new Map<unknown, unknown>([
+        ['fmt', 'none'],
+        ['attStmt', new Map()],
+        ['authData', pkAuthData],
+      ])
+    );
+
+    const pkRegVerify = await req('/api/user/passkeys/register/verify', samJar, {
+      method: 'POST',
+      body: {
+        challengeId: pkRegOpts.challengeId,
+        name: 'Virtual Test Key',
+        clientDataJSON: toBase64Url(
+          new TextEncoder().encode(
+            JSON.stringify({ type: 'webauthn.create', challenge: pkRegOpts.options.challenge, origin: 'http://localhost' })
+          )
+        ),
+        attestationObject: toBase64Url(pkAtt),
+        transports: ['internal'],
+      },
+    });
+    expect(pkRegVerify.status).toBe(201);
+
+    const pkLoginOptsResp = await req('/api/auth/passkeys/login/options', new CookieJar(), {
+      method: 'POST',
+      body: { email: 'sam@example.com' },
+    });
+    const pkLoginOpts = ((await pkLoginOptsResp.json()) as { data: { challengeId: string; options: { challenge: string } } }).data;
+    const pkLoginClientBytes = new TextEncoder().encode(
+      JSON.stringify({ type: 'webauthn.get', challenge: pkLoginOpts.options.challenge, origin: 'http://localhost' })
+    );
+    const pkAssertAuth = new Uint8Array(37);
+    pkAssertAuth.set(rpHash, 0);
+    pkAssertAuth[32] = 0x05;
+    new DataView(pkAssertAuth.buffer).setUint32(33, 2, false);
+    const pkClientHash = new Uint8Array(await crypto.subtle.digest('SHA-256', pkLoginClientBytes));
+    const pkSigned = new Uint8Array(pkAssertAuth.length + pkClientHash.length);
+    pkSigned.set(pkAssertAuth, 0);
+    pkSigned.set(pkClientHash, pkAssertAuth.length);
+    const pkSig = new Uint8Array(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, pkKp.privateKey, pkSigned));
+
+    const pkPasskeyLogin = await req('/api/auth/passkeys/login/verify', new CookieJar(), {
+      method: 'POST',
+      body: {
+        challengeId: pkLoginOpts.challengeId,
+        credentialId: toBase64Url(pkCredId),
+        clientDataJSON: toBase64Url(pkLoginClientBytes),
+        authenticatorData: toBase64Url(pkAssertAuth),
+        signature: toBase64Url(pkSig),
+      },
+    });
+    expect(pkPasskeyLogin.status).toBe(200);
+
+    // 7. KV brute-force login lockout & 60s email resend cooldown (distinct IP so IP rate limiter stays under cap)
+    const lockoutHeaders = { 'CF-Connecting-IP': '198.51.100.42' };
+    for (let i = 0; i < 5; i++) {
+      const bad = await req('/api/auth/login', new CookieJar(), {
+        method: 'POST',
+        headers: lockoutHeaders,
+        body: { email: 'lockout@example.com', password: 'WrongPassword!', turnstileToken: 'test-token' },
+      });
+      expect(bad.status).toBe(401);
+    }
+    const lockedOut = await req('/api/auth/login', new CookieJar(), {
+      method: 'POST',
+      headers: lockoutHeaders,
+      body: { email: 'lockout@example.com', password: 'WrongPassword!', turnstileToken: 'test-token' },
+    });
+    expect(lockedOut.status).toBe(429);
+    expect(((await lockedOut.json()) as { error: { code: string } }).error.code).toBe('ACCOUNT_LOCKED');
+
+    const cooldownHeaders = { 'CF-Connecting-IP': '198.51.100.43' };
+    const emailsBefore = emailDispatchLog.length;
+    await req('/api/auth/forgot-password', new CookieJar(), {
+      method: 'POST',
+      headers: cooldownHeaders,
+      body: { email: 'sam@example.com', turnstileToken: 'test-token' },
+    });
+    await req('/api/auth/forgot-password', new CookieJar(), {
+      method: 'POST',
+      headers: cooldownHeaders,
+      body: { email: 'sam@example.com', turnstileToken: 'test-token' },
+    });
+    expect(emailDispatchLog.length - emailsBefore).toBe(1);
+
+    // 8. RP-Initiated Logout (/oauth/logout)
+    const badRpLogout = await req(
+      `/oauth/logout?client_id=${encodeURIComponent(pubApp.client_id)}&post_logout_redirect_uri=${encodeURIComponent(
+        'https://evil.example.com/steal'
+      )}`,
+      samJar
+    );
+    expect(badRpLogout.status).toBe(400);
+
+    const rpLogoutConfirm = await req(
+      `/oauth/logout?client_id=${encodeURIComponent(pubApp.client_id)}&post_logout_redirect_uri=${encodeURIComponent(
+        'https://spa.example.com/signed-out'
+      )}&state=bye1`,
+      samJar
+    );
+    expect(rpLogoutConfirm.status).toBe(200);
+    expect(await rpLogoutConfirm.text()).toContain('action="/oauth/logout"');
+
+    const rpLogoutWithHint = await req(
+      `/oauth/logout?id_token_hint=${encodeURIComponent(pubTokens.id_token)}&post_logout_redirect_uri=${encodeURIComponent(
+        'https://spa.example.com/signed-out'
+      )}&state=bye2`,
+      samJar
+    );
+    expect(rpLogoutWithHint.status).toBe(302);
+    expect(rpLogoutWithHint.headers.get('location')).toBe('https://spa.example.com/signed-out?state=bye2');
+    expect((await req('/api/user/me', samJar)).status).toBe(401);
+
+    // 9. Admin User Inspector, Paginated Audit Logs & CSV/JSON Export
+    const userDetails = await req(`/api/admin/users/${samId}/details`, superJar);
+    expect(userDetails.status).toBe(200);
+    const detailsData = ((await userDetails.json()) as {
+      data: { user: { email: string }; passkeys: unknown[]; ownedApps: unknown[] };
+    }).data;
+    expect(detailsData.user.email).toBe('sam@example.com');
+    expect(detailsData.passkeys.length).toBeGreaterThanOrEqual(1);
+    expect(detailsData.ownedApps.length).toBeGreaterThanOrEqual(1);
+
+    const pagedLogsResp = await req('/api/admin/audit-logs?page=1&limit=3', superJar);
+    expect(pagedLogsResp.status).toBe(200);
+    const pagedLogs = ((await pagedLogsResp.json()) as {
+      data: { logs: unknown[]; total: number; page: number; totalPages: number };
+    }).data;
+    expect(pagedLogs.logs.length).toBeLessThanOrEqual(3);
+    expect(pagedLogs.total).toBeGreaterThan(3);
+    expect(pagedLogs.totalPages).toBeGreaterThanOrEqual(2);
+
+    const csvExport = await req('/api/admin/audit-logs/export?format=csv', superJar);
+    expect(csvExport.status).toBe(200);
+    expect(csvExport.headers.get('content-type')).toContain('text/csv');
+    expect(await csvExport.text()).toContain('id,actor_id,action');
+
+    const jsonExport = await req('/api/admin/audit-logs/export?format=json', superJar);
+    expect(jsonExport.status).toBe(200);
+    expect(jsonExport.headers.get('content-type')).toContain('application/json');
   });
 });

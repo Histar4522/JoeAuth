@@ -151,9 +151,9 @@ export async function createSession(
   }
 
   await c.env.DB.prepare(
-    'INSERT INTO sessions (id, user_id, is_superuser, ip_hash, user_agent, expires_at, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO sessions (id, user_id, is_superuser, ip_hash, user_agent, expires_at, created_at, last_seen_at, auth_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
   )
-    .bind(tokenHash, opts.userId, opts.isSuperuser ? 1 : 0, ipHash, ua, expiresAt, now, now)
+    .bind(tokenHash, opts.userId, opts.isSuperuser ? 1 : 0, ipHash, ua, expiresAt, now, now, now)
     .run();
 
   if (replaceIdx === -1) {
@@ -295,6 +295,7 @@ export async function resolveSession(c: Context<AppEnv>): Promise<AuthContext | 
         isSuperuser: true,
         user: null,
         lastSeenAt: s.last_seen_at,
+        authTime: s.auth_time || s.created_at,
       });
       if (now - s.last_seen_at > 300) staleSeenIds.push(s.id);
     } else {
@@ -310,6 +311,7 @@ export async function resolveSession(c: Context<AppEnv>): Promise<AuthContext | 
         isSuperuser: false,
         user,
         lastSeenAt: s.last_seen_at,
+        authTime: s.auth_time || s.created_at,
       });
       if (now - s.last_seen_at > 300) staleSeenIds.push(s.id);
     }
@@ -390,6 +392,27 @@ export async function isEmailVerificationRequired(env: Bindings): Promise<boolea
 
 export function getPepper(env: Bindings): string {
   return env.PASSWORD_PEPPER || 'joeauth-dev-fallback-pepper';
+}
+
+export function parseUserAgentSummary(ua: string | null | undefined): string {
+  const s = (ua || '').trim();
+  if (!s) return 'Unknown device';
+
+  let browser = 'Browser';
+  if (s.includes('Edg/')) browser = 'Edge';
+  else if (s.includes('Firefox/')) browser = 'Firefox';
+  else if (s.includes('Chrome/') && !s.includes('Chromium/')) browser = 'Chrome';
+  else if (s.includes('Safari/') && !s.includes('Chrome/')) browser = 'Safari';
+  else if (s.includes('curl/')) browser = 'curl';
+
+  let os = '';
+  if (s.includes('Windows')) os = 'Windows';
+  else if (s.includes('iPhone') || s.includes('iPad')) os = 'iOS';
+  else if (s.includes('Android')) os = 'Android';
+  else if (s.includes('Mac OS X')) os = 'macOS';
+  else if (s.includes('Linux')) os = 'Linux';
+
+  return os ? `${browser} on ${os}` : browser;
 }
 
 export async function deleteUserAccountData(

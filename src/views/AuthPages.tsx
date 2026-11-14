@@ -18,6 +18,9 @@ export const AccountChooserPage: FC<{
     code_challenge: string;
     code_challenge_method: string;
     nonce: string;
+    prompt?: string;
+    login_hint?: string;
+    max_age?: string;
   };
 }> = ({ csrfToken, accounts, returnTo = '/account', oauthParams }) => {
   const userAccounts = accounts.filter((a) => !a.isSuperuser && a.user);
@@ -32,11 +35,16 @@ export const AccountChooserPage: FC<{
         code_challenge: oauthParams.code_challenge,
         code_challenge_method: oauthParams.code_challenge_method,
         nonce: oauthParams.nonce,
+        prompt: oauthParams.prompt || '',
+        login_hint: oauthParams.login_hint || '',
+        max_age: oauthParams.max_age || '',
         selected: '1',
       }).toString()}`
     : returnTo;
 
-  const addAccountHref = `/login?mode=add&return_to=${encodeURIComponent(effectiveReturnTo)}`;
+  const loginQuery = new URLSearchParams({ mode: 'add', return_to: effectiveReturnTo });
+  if (oauthParams?.login_hint) loginQuery.set('login_hint', oauthParams.login_hint);
+  const addAccountHref = `/login?${loginQuery.toString()}`;
   const registerHref = `/register?return_to=${encodeURIComponent(effectiveReturnTo)}`;
 
   return (
@@ -75,6 +83,9 @@ export const AccountChooserPage: FC<{
                       <input type="hidden" name="code_challenge" value={oauthParams.code_challenge} />
                       <input type="hidden" name="code_challenge_method" value={oauthParams.code_challenge_method} />
                       <input type="hidden" name="nonce" value={oauthParams.nonce} />
+                      <input type="hidden" name="prompt" value={oauthParams.prompt || ''} />
+                      <input type="hidden" name="login_hint" value={oauthParams.login_hint || ''} />
+                      <input type="hidden" name="max_age" value={oauthParams.max_age || ''} />
                       <button type="submit" class="account-btn">
                         <UserAvatar user={u} size={38} />
                         <span class="account-meta">
@@ -142,7 +153,8 @@ export const LoginPage: FC<{
   returnTo?: string;
   verified?: boolean;
   hasSavedAccounts?: boolean;
-}> = ({ csrfToken, siteKey, returnTo = '/account', verified = false, hasSavedAccounts = false }) => (
+  loginHint?: string;
+}> = ({ csrfToken, siteKey, returnTo = '/account', verified = false, hasSavedAccounts = false, loginHint = '' }) => (
   <Layout title="Sign in" csrfToken={csrfToken} turnstile>
     <div class="card shadow-sm auth-card">
       <div class="card-body p-4">
@@ -165,6 +177,7 @@ export const LoginPage: FC<{
               name="email"
               required
               autocomplete="email"
+              value={loginHint}
               placeholder="joe@example.com"
             />
           </div>
@@ -180,9 +193,14 @@ export const LoginPage: FC<{
             />
           </div>
           <div id="totp-group" class="mb-3 hidden">
-            <label class="form-label" for="login-totp">
-              <i class="bi bi-shield-lock me-1"></i>Authenticator Code
-            </label>
+            <div class="d-flex justify-content-between align-items-center mb-1">
+              <label class="form-label mb-0" for="login-totp" id="login-2fa-label">
+                <i class="bi bi-shield-lock me-1"></i>Authenticator Code
+              </label>
+              <button type="button" class="btn btn-link btn-sm p-0 text-decoration-none" id="toggle-recovery-mode">
+                Use recovery code
+              </button>
+            </div>
             <input
               id="login-totp"
               class="form-control"
@@ -192,12 +210,25 @@ export const LoginPage: FC<{
               pattern="[0-9]{6}"
               placeholder="123456"
             />
+            <input
+              id="login-recovery-code"
+              class="form-control hidden"
+              type="text"
+              name="recoveryCode"
+              placeholder="ABCD-EFGH"
+              autocomplete="one-time-code"
+            />
           </div>
           <div class="cf-turnstile mb-3" data-sitekey={siteKey}></div>
           <button type="submit" class="btn btn-primary w-100">
             <i class="bi bi-box-arrow-in-right me-1"></i>Sign in
           </button>
         </form>
+        <div class="d-grid mt-2">
+          <button type="button" id="passkey-login-btn" class="btn btn-outline-secondary w-100" data-return-to={returnTo}>
+            <i class="bi bi-key me-1"></i>Sign in with Passkey
+          </button>
+        </div>
         <div class="d-flex justify-content-between mt-3 small">
           <a href="/forgot-password">Forgot password?</a>
           <a href={`/register?return_to=${encodeURIComponent(returnTo)}`}>Create account</a>
@@ -362,6 +393,91 @@ export const AdminLoginPage: FC<{ csrfToken: string; siteKey: string }> = ({
           <div class="cf-turnstile mb-3" data-sitekey={siteKey}></div>
           <button type="submit" class="btn btn-primary w-100">
             <i class="bi bi-shield-check me-1"></i>Sign in
+          </button>
+        </form>
+      </div>
+    </div>
+  </Layout>
+);
+
+export const DevicePage: FC<{
+  csrfToken: string;
+  userCode?: string;
+  userEmail: string;
+}> = ({ csrfToken, userCode = '', userEmail }) => (
+  <Layout title="Device Verification" csrfToken={csrfToken}>
+    <div class="card shadow-sm auth-card">
+      <div class="card-body p-4">
+        <h1 class="h4 fw-semibold mb-2">
+          <i class="bi bi-tv me-2 text-primary"></i>Authorize Device
+        </h1>
+        <p class="text-body-secondary small mb-3">
+          Signed in as <strong>{userEmail}</strong>. Enter the code displayed on your device.
+        </p>
+        <div id="form-alert" class="alert hidden"></div>
+        <form id="device-approve-form">
+          <div class="mb-3">
+            <label class="form-label" for="device-user-code">Device Code</label>
+            <input
+              id="device-user-code"
+              class="form-control form-control-lg text-center font-monospace text-uppercase"
+              type="text"
+              name="userCode"
+              required
+              value={userCode}
+              placeholder="XXXX-XXXX"
+            />
+          </div>
+          <div class="d-flex gap-2">
+            <button type="button" class="btn btn-outline-secondary flex-fill" id="device-deny-btn">
+              Deny
+            </button>
+            <button type="submit" class="btn btn-primary flex-fill">
+              <i class="bi bi-check2-circle me-1"></i>Approve Device
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </Layout>
+);
+
+export const LogoutConfirmPage: FC<{
+  appName: string;
+  csrfToken: string;
+  userEmail: string;
+  clientName: string | null;
+  postLogoutRedirectUri: string;
+  clientId: string;
+  state: string;
+}> = ({ appName, csrfToken, userEmail, clientName, postLogoutRedirectUri, clientId, state }) => (
+  <Layout title="Sign out" csrfToken={csrfToken}>
+    <div class="card shadow-sm auth-card">
+      <div class="card-body p-4">
+        <h1 class="h4 fw-semibold mb-2">
+          <i class="bi bi-box-arrow-right me-2 text-primary"></i>Sign out of {appName}
+        </h1>
+        <p class="text-body-secondary small mb-3">
+          {clientName ? (
+            <>
+              <strong>{clientName}</strong> requested to sign you out of <strong>{userEmail}</strong>.
+            </>
+          ) : (
+            <>
+              Confirm signing out of <strong>{userEmail}</strong>.
+            </>
+          )}
+        </p>
+        <form method="post" action="/oauth/logout" class="d-flex gap-2">
+          <input type="hidden" name="_csrf" value={csrfToken} />
+          <input type="hidden" name="post_logout_redirect_uri" value={postLogoutRedirectUri} />
+          <input type="hidden" name="client_id" value={clientId} />
+          <input type="hidden" name="state" value={state} />
+          <button type="submit" name="decision" value="cancel" class="btn btn-outline-secondary flex-fill">
+            Stay signed in
+          </button>
+          <button type="submit" name="decision" value="confirm" class="btn btn-danger flex-fill">
+            <i class="bi bi-box-arrow-right me-1"></i>Sign out
           </button>
         </form>
       </div>

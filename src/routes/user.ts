@@ -3,8 +3,10 @@ import { renderSVG } from 'uqr';
 import type { AppEnv, SessionRow } from '../types';
 import {
   buildTotpUri,
+  generateRecoveryCodes,
   generateTotpSecret,
   hashPassword,
+  normalizeRecoveryCode,
   nowSec,
   randomBase64Url,
   sha256Hex,
@@ -17,11 +19,14 @@ import {
   getIpHash,
   getPepper,
   isEmailVerificationRequired,
+  parseUserAgentSummary,
 } from '../lib/session';
 import { evaluateRegistrationEmail, getActiveRules } from '../lib/rules';
 import { extractUploadedPng, getAppLogoUrl, getUserAvatarUrl } from '../lib/images';
 import { sendEmail, verificationEmailContent } from '../lib/email';
 import { writeAuditLog } from '../lib/audit';
+import { toBase64Url, verifyRegistrationResponse } from '../lib/webauthn';
+import { dispatchAppWebhooks } from '../lib/webhooks';
 import { requireCsrf, requireUser } from '../middleware/auth';
 
 const userRoutes = new Hono<AppEnv>();
@@ -227,17 +232,19 @@ userRoutes.post('/change-password', requireCsrf, async (c) => {
 userRoutes.get('/sessions', async (c) => {
   const auth = c.get('auth')!;
   const { results } = await c.env.DB.prepare(
-    'SELECT id, ip_hash, user_agent, created_at, last_seen_at, expires_at FROM sessions WHERE user_id = ? AND expires_at > ? ORDER BY last_seen_at DESC'
+    'SELECT id, ip_hash, user_agent, auth_time, created_at, last_seen_at, expires_at FROM sessions WHERE user_id = ? AND expires_at > ? ORDER BY last_seen_at DESC'
   )
     .bind(auth.user!.id, nowSec())
-    .all<Pick<SessionRow, 'id' | 'ip_hash' | 'user_agent' | 'created_at' | 'last_seen_at' | 'expires_at'>>();
+    .all<Pick<SessionRow, 'id' | 'ip_hash' | 'user_agent' | 'auth_time' | 'created_at' | 'last_seen_at' | 'expires_at'>>();
 
   return c.json({
     ok: true,
     data: (results || []).map((s) => ({
       id: s.id,
       user_agent: s.user_agent,
+      device_label: parseUserAgentSummary(s.user_agent),
       ip_hash: s.ip_hash,
+      auth_time: s.auth_time || s.created_at,
       created_at: s.created_at,
       last_seen_at: s.last_seen_at,
       expires_at: s.expires_at,
@@ -303,6 +310,12 @@ userRoutes.delete('/apps/:appId', requireCsrf, async (c) => {
     c.env.DB.prepare('DELETE FROM user_consents WHERE user_id = ? AND app_id = ?').bind(user.id, appId),
     c.env.DB.prepare('UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ? AND app_id = ?').bind(user.id, appId),
   ]);
+  await dispatchAppWebhooks(c.env, c.executionCtx, {
+    event: 'consent.revoked',
+    userId: user.id,
+    appId,
+    data: { user_id: user.id },
+  });
   return c.json({ ok: true, data: { revoked: true } });
 });
 
@@ -327,6 +340,21 @@ userRoutes.post('/2fa/setup', requireCsrf, async (c) => {
   });
 });
 
+async function replaceUserRecoveryCodes(db: D1Database, userId: string): Promise<string[]> {
+  const codes = generateRecoveryCodes(8);
+  const now = nowSec();
+  const inserts = await Promise.all(
+    codes.map(async (code) => {
+      const hash = await sha256Hex(`${userId}:${normalizeRecoveryCode(code)}`);
+      return db
+        .prepare('INSERT INTO user_recovery_codes (id, user_id, code_hash, created_at) VALUES (?, ?, ?, ?)')
+        .bind(crypto.randomUUID(), userId, hash, now);
+    })
+  );
+  await db.batch([db.prepare('DELETE FROM user_recovery_codes WHERE user_id = ?').bind(userId), ...inserts]);
+  return codes;
+}
+
 userRoutes.post('/2fa/verify', requireCsrf, async (c) => {
   const user = c.get('auth')!.user!;
   const body = await c.req.json<{ code?: string }>().catch(() => ({} as Record<string, undefined>));
@@ -341,8 +369,30 @@ userRoutes.post('/2fa/verify', requireCsrf, async (c) => {
     .bind(nowSec(), user.id)
     .run();
 
+  const recoveryCodes = await replaceUserRecoveryCodes(c.env.DB, user.id);
   await writeAuditLog(c.env.DB, { actorId: user.id, action: 'user.2fa_enabled', targetType: 'user', targetId: user.id });
-  return c.json({ ok: true, data: { totpEnabled: true } });
+  return c.json({ ok: true, data: { totpEnabled: true, recoveryCodes } });
+});
+
+userRoutes.post('/2fa/recovery-codes/regenerate', requireCsrf, async (c) => {
+  const user = c.get('auth')!.user!;
+  const body = await c.req.json<{ currentPassword?: string }>().catch(() => ({} as Record<string, undefined>));
+  if (user.totp_enabled !== 1) {
+    return c.json({ ok: false, error: { code: 'TOTP_NOT_ENABLED', message: 'Enable 2FA first.' } }, 400);
+  }
+  if (!(await verifyPassword(body.currentPassword || '', user.password_hash, getPepper(c.env)))) {
+    return c.json({ ok: false, error: { code: 'INVALID_PASSWORD', message: 'Password is incorrect.' } }, 401);
+  }
+
+  const recoveryCodes = await replaceUserRecoveryCodes(c.env.DB, user.id);
+  await writeAuditLog(c.env.DB, {
+    actorId: user.id,
+    action: 'user.2fa_recovery_regenerated',
+    targetType: 'user',
+    targetId: user.id,
+    ipHash: await getIpHash(c),
+  });
+  return c.json({ ok: true, data: { recoveryCodes } });
 });
 
 userRoutes.delete('/2fa', requireCsrf, async (c) => {
@@ -351,11 +401,186 @@ userRoutes.delete('/2fa', requireCsrf, async (c) => {
   if (!(await verifyPassword(body.currentPassword || '', user.password_hash, getPepper(c.env)))) {
     return c.json({ ok: false, error: { code: 'INVALID_PASSWORD', message: 'Password is incorrect.' } }, 401);
   }
-  await c.env.DB.prepare('UPDATE users SET totp_enabled = 0, totp_secret = NULL, updated_at = ? WHERE id = ?')
-    .bind(nowSec(), user.id)
-    .run();
+  await c.env.DB.batch([
+    c.env.DB.prepare('UPDATE users SET totp_enabled = 0, totp_secret = NULL, updated_at = ? WHERE id = ?').bind(nowSec(), user.id),
+    c.env.DB.prepare('DELETE FROM user_recovery_codes WHERE user_id = ?').bind(user.id),
+  ]);
   await writeAuditLog(c.env.DB, { actorId: user.id, action: 'user.2fa_disabled', targetType: 'user', targetId: user.id });
   return c.json({ ok: true, data: { totpEnabled: false } });
+});
+
+// --- WebAuthn Passkeys ---
+
+userRoutes.get('/passkeys', async (c) => {
+  const user = c.get('auth')!.user!;
+  const { results } = await c.env.DB.prepare(
+    'SELECT id, label AS name, transports, created_at, last_used_at FROM webauthn_credentials WHERE user_id = ? ORDER BY created_at DESC'
+  )
+    .bind(user.id)
+    .all<{ id: string; name: string; transports: string; created_at: number; last_used_at: number | null }>();
+
+  return c.json({
+    ok: true,
+    data: (results || []).map((r) => ({
+      ...r,
+      transports: (() => {
+        try {
+          return JSON.parse(r.transports) as string[];
+        } catch {
+          return [];
+        }
+      })(),
+    })),
+  });
+});
+
+userRoutes.post('/passkeys/register/options', requireCsrf, async (c) => {
+  const user = c.get('auth')!.user!;
+  const { results } = await c.env.DB.prepare('SELECT id AS credential_id FROM webauthn_credentials WHERE user_id = ?')
+    .bind(user.id)
+    .all<{ credential_id: string }>();
+
+  if ((results || []).length >= 10) {
+    return c.json({ ok: false, error: { code: 'LIMIT_REACHED', message: 'Maximum of 10 passkeys per account.' } }, 400);
+  }
+
+  const challenge = randomBase64Url(32);
+  const challengeId = randomBase64Url(16);
+  const rpId = new URL(c.req.url).hostname;
+
+  await c.env.AUTH_CACHE.put(
+    `passkey:reg:${challengeId}`,
+    JSON.stringify({ userId: user.id, challenge }),
+    { expirationTtl: 300 }
+  );
+
+  return c.json({
+    ok: true,
+    data: {
+      challengeId,
+      options: {
+        challenge,
+        rp: { name: c.env.APP_NAME || 'JoeAuth', id: rpId },
+        user: {
+          id: toBase64Url(new TextEncoder().encode(user.id)),
+          name: user.email,
+          displayName: user.name,
+        },
+        pubKeyCredParams: [
+          { type: 'public-key', alg: -7 },
+          { type: 'public-key', alg: -257 },
+        ],
+        timeout: 60000,
+        authenticatorSelection: {
+          residentKey: 'preferred',
+          userVerification: 'preferred',
+        },
+        excludeCredentials: (results || []).map((r) => ({ id: r.credential_id, type: 'public-key' })),
+      },
+    },
+  });
+});
+
+userRoutes.post('/passkeys/register/verify', requireCsrf, async (c) => {
+  const user = c.get('auth')!.user!;
+  const body = await c.req.json<{
+    challengeId?: string;
+    name?: string;
+    clientDataJSON?: string;
+    attestationObject?: string;
+    transports?: string[];
+  }>().catch(() => ({} as Record<string, unknown>));
+
+  const challengeId = typeof body.challengeId === 'string' ? body.challengeId.trim() : '';
+  const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 48) : 'Passkey';
+  if (!challengeId || typeof body.clientDataJSON !== 'string' || typeof body.attestationObject !== 'string') {
+    return c.json({ ok: false, error: { code: 'INVALID_INPUT', message: 'Incomplete passkey registration data.' } }, 400);
+  }
+
+  const key = `passkey:reg:${challengeId}`;
+  const raw = await c.env.AUTH_CACHE.get(key);
+  await c.env.AUTH_CACHE.delete(key).catch(() => {});
+  if (!raw) {
+    return c.json({ ok: false, error: { code: 'CHALLENGE_EXPIRED', message: 'Registration session expired.' } }, 400);
+  }
+
+  const parsedChallenge = JSON.parse(raw) as { userId: string; challenge: string };
+  if (parsedChallenge.userId !== user.id) {
+    return c.json({ ok: false, error: { code: 'FORBIDDEN', message: 'Challenge does not belong to current user.' } }, 403);
+  }
+
+  const reqUrl = new URL(c.req.url);
+  let verified;
+  try {
+    verified = await verifyRegistrationResponse({
+      clientDataJSON: body.clientDataJSON,
+      attestationObject: body.attestationObject,
+      expectedChallenge: parsedChallenge.challenge,
+      expectedOrigin: reqUrl.origin,
+      expectedRpId: reqUrl.hostname,
+    });
+  } catch (err) {
+    return c.json(
+      { ok: false, error: { code: 'INVALID_ATTESTATION', message: err instanceof Error ? err.message : 'Invalid passkey data.' } },
+      400
+    );
+  }
+
+  const existing = await c.env.DB.prepare('SELECT id FROM webauthn_credentials WHERE id = ?')
+    .bind(verified.credentialId)
+    .first();
+  if (existing) {
+    return c.json({ ok: false, error: { code: 'DUPLICATE_PASSKEY', message: 'This passkey is already registered.' } }, 409);
+  }
+
+  const transports = Array.isArray(body.transports)
+    ? body.transports.filter((t): t is string => typeof t === 'string').slice(0, 6)
+    : [];
+
+  await c.env.DB.prepare(
+    `INSERT INTO webauthn_credentials (id, user_id, label, public_key_jwk, alg, sign_count, transports, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  )
+    .bind(
+      verified.credentialId,
+      user.id,
+      name,
+      verified.publicKeyJwkJson,
+      verified.alg,
+      verified.signCount,
+      JSON.stringify(transports),
+      nowSec()
+    )
+    .run();
+
+  await writeAuditLog(c.env.DB, {
+    actorId: user.id,
+    action: 'user.passkey_added',
+    targetType: 'webauthn_credential',
+    targetId: verified.credentialId,
+    ipHash: await getIpHash(c),
+  });
+
+  return c.json({ ok: true, data: { id: verified.credentialId, name, transports } }, 201);
+});
+
+userRoutes.delete('/passkeys/:id', requireCsrf, async (c) => {
+  const user = c.get('auth')!.user!;
+  const id = c.req.param('id');
+  const res = await c.env.DB.prepare('DELETE FROM webauthn_credentials WHERE id = ? AND user_id = ?')
+    .bind(id, user.id)
+    .run();
+  if (!res.meta.changes) {
+    return c.json({ ok: false, error: { code: 'NOT_FOUND', message: 'Passkey not found.' } }, 404);
+  }
+  await writeAuditLog(c.env.DB, {
+    actorId: user.id,
+    action: 'user.passkey_removed',
+    targetType: 'webauthn_credential',
+    targetId: id,
+    ipHash: await getIpHash(c),
+  });
+  return c.json({ ok: true, data: { deleted: true } });
 });
 
 userRoutes.delete('/account', requireCsrf, async (c) => {
@@ -364,6 +589,12 @@ userRoutes.delete('/account', requireCsrf, async (c) => {
   if (!(await verifyPassword(body.currentPassword || '', user.password_hash, getPepper(c.env)))) {
     return c.json({ ok: false, error: { code: 'INVALID_PASSWORD', message: 'Password is incorrect.' } }, 401);
   }
+
+  await dispatchAppWebhooks(c.env, c.executionCtx, {
+    event: 'user.deleted',
+    userId: user.id,
+    data: { user_id: user.id },
+  });
 
   await writeAuditLog(c.env.DB, {
     actorId: user.id,

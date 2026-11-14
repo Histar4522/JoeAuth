@@ -112,24 +112,59 @@ export const UserPanel: FC<{
                 <i class="bi bi-qr-code-scan me-2"></i>Two-Factor Authentication (TOTP)
               </h3>
               {user.totp_enabled === 1 ? (
-                <form id="totp-disable-form">
+                <div>
                   <p class="text-body-secondary small">
                     2FA is currently <strong class="text-success">Enabled</strong>.
                   </p>
-                  <div class="mb-3">
-                    <label class="form-label" for="totp-disable-pwd">Confirm Password to Disable 2FA</label>
-                    <input id="totp-disable-pwd" class="form-control" type="password" name="currentPassword" required />
+                  <div id="recovery-codes-box" class="alert alert-warning hidden mb-3">
+                    <div class="fw-semibold small mb-1">Save these one-time recovery codes in a safe place:</div>
+                    <pre id="recovery-codes-list" class="small mb-2 user-select-all"></pre>
+                    <button type="button" class="btn btn-sm btn-outline-dark" id="copy-recovery-codes-btn">
+                      <i class="bi bi-clipboard me-1"></i>Copy Codes
+                    </button>
                   </div>
-                  <button type="submit" class="btn btn-danger">
-                    <i class="bi bi-shield-x me-1"></i>Disable 2FA
-                  </button>
-                </form>
+                  <form id="regenerate-recovery-form" class="mb-3">
+                    <div class="input-group input-group-sm">
+                      <input
+                        class="form-control"
+                        type="password"
+                        name="currentPassword"
+                        required
+                        placeholder="Password to regenerate recovery codes"
+                      />
+                      <button type="submit" class="btn btn-outline-secondary">
+                        <i class="bi bi-arrow-repeat me-1"></i>New Recovery Codes
+                      </button>
+                    </div>
+                  </form>
+                  <form id="totp-disable-form">
+                    <div class="mb-3">
+                      <label class="form-label" for="totp-disable-pwd">Confirm Password to Disable 2FA</label>
+                      <input id="totp-disable-pwd" class="form-control" type="password" name="currentPassword" required />
+                    </div>
+                    <button type="submit" class="btn btn-danger">
+                      <i class="bi bi-shield-x me-1"></i>Disable 2FA
+                    </button>
+                  </form>
+                </div>
               ) : (
                 <div>
                   <p class="text-body-secondary small">Protect your account with an authenticator app.</p>
                   <button type="button" id="totp-setup-btn" class="btn btn-outline-secondary">
                     <i class="bi bi-qr-code me-1"></i>Set up 2FA
                   </button>
+                  <div id="recovery-codes-box" class="alert alert-warning hidden mt-3">
+                    <div class="fw-semibold small mb-1">2FA enabled! Save these one-time recovery codes now:</div>
+                    <pre id="recovery-codes-list" class="small mb-2 user-select-all"></pre>
+                    <div class="d-flex gap-2">
+                      <button type="button" class="btn btn-sm btn-outline-dark" id="copy-recovery-codes-btn">
+                        <i class="bi bi-clipboard me-1"></i>Copy Codes
+                      </button>
+                      <button type="button" class="btn btn-sm btn-primary" onclick="window.location.reload()">
+                        Done
+                      </button>
+                    </div>
+                  </div>
                   <div id="totp-setup-box" class="hidden mt-3">
                     <p class="small mb-2">
                       Scan this QR code with your authenticator app (or enter the key manually), then enter the 6-digit code:
@@ -156,6 +191,35 @@ export const UserPanel: FC<{
           </section>
         </div>
       </div>
+
+      <section class="card shadow-sm mt-4">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+            <div>
+              <h2 class="h5 fw-semibold mb-1">
+                <i class="bi bi-key me-2 text-primary"></i>Passkeys
+              </h2>
+              <p class="text-body-secondary small mb-0">
+                Sign in securely without typing your password using biometrics or hardware security keys.
+              </p>
+            </div>
+            <div class="d-flex gap-2 align-items-center">
+              <input
+                id="passkey-name-input"
+                type="text"
+                class="form-control form-control-sm"
+                placeholder="Device nickname (e.g. Work Laptop)"
+                maxlength={48}
+                style="max-width: 220px;"
+              />
+              <button type="button" id="add-passkey-btn" class="btn btn-sm btn-primary text-nowrap">
+                <i class="bi bi-plus-lg me-1"></i>Add Passkey
+              </button>
+            </div>
+          </div>
+          <div id="passkeys-list" class="table-responsive text-body-secondary small">Loading passkeys...</div>
+        </div>
+      </section>
 
       <section class="card shadow-sm mt-4">
         <div class="card-body">

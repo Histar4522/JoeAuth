@@ -1,16 +1,18 @@
 import { Hono } from 'hono';
 import type { AppEnv, AppRow, DeveloperApplicationRow } from '../types';
-import { hashSecretValue, nowSec, randomBase64Url, randomHex, verifyPassword } from '../lib/crypto';
+import { encryptSecretValue, hashSecretValue, nowSec, randomBase64Url, randomHex, verifyPassword } from '../lib/crypto';
 import { extractUploadedPng, getAppLogoUrl } from '../lib/images';
 import { getIpHash, getPepper } from '../lib/session';
 import { verifyTurnstile } from '../lib/turnstile';
 import { writeAuditLog } from '../lib/audit';
+import { dispatchAppWebhooks, isSafeWebhookUrl } from '../lib/webhooks';
 import { requireApprovedDeveloper, requireCsrf, requireUser } from '../middleware/auth';
 
 const ALLOWED_SCOPES = new Set(['openid', 'profile', 'email', 'offline_access']);
 
-function parseValidRedirectUris(input: unknown): string[] | null {
-  if (!Array.isArray(input) || input.length === 0 || input.length > 10) return null;
+function parseValidRedirectUris(input: unknown, allowEmpty = false): string[] | null {
+  if (!Array.isArray(input)) return null;
+  if ((!allowEmpty && input.length === 0) || input.length > 10) return null;
   const out: string[] = [];
   for (const raw of input) {
     if (typeof raw !== 'string') return null;
@@ -124,7 +126,7 @@ devRoutes.post('/apply', requireUser, requireCsrf, async (c) => {
 devRoutes.get('/apps', requireApprovedDeveloper, async (c) => {
   const user = c.get('auth')!.user!;
   const { results } = await c.env.DB.prepare(
-    `SELECT id, name, description, privilege_description, homepage_url, client_id, client_secret_prefix, redirect_uris, allowed_scopes, logo_key, logo_version, is_first_party, status, created_at, updated_at
+    `SELECT id, name, description, privilege_description, homepage_url, client_id, client_secret_prefix, client_type, redirect_uris, post_logout_redirect_uris, allowed_scopes, webhook_url, webhook_secret_enc, logo_key, logo_version, is_first_party, status, created_at, updated_at
      FROM apps WHERE owner_user_id = ? ORDER BY created_at DESC`
   )
     .bind(user.id)
@@ -132,12 +134,15 @@ devRoutes.get('/apps', requireApprovedDeveloper, async (c) => {
 
   return c.json({
     ok: true,
-    data: (results || []).map(({ logo_key, ...a }) => ({
+    data: (results || []).map(({ logo_key, webhook_secret_enc, ...a }) => ({
       ...a,
       has_custom_logo: Boolean(logo_key),
       logo_url: logo_key ? getAppLogoUrl('', a.id, a.logo_version) : null,
       redirect_uris: JSON.parse(a.redirect_uris),
+      post_logout_redirect_uris: JSON.parse(a.post_logout_redirect_uris || '[]'),
       allowed_scopes: JSON.parse(a.allowed_scopes),
+      webhook_url: a.webhook_url || '',
+      has_webhook_secret: Boolean(webhook_secret_enc),
     })),
   });
 });
@@ -149,8 +154,11 @@ devRoutes.post('/apps', requireApprovedDeveloper, requireCsrf, async (c) => {
     description?: string;
     privilegeDescription?: string;
     homepageUrl?: string;
+    clientType?: string;
     redirectUris?: string[];
+    postLogoutRedirectUris?: string[];
     allowedScopes?: string[];
+    webhookUrl?: string;
   }>().catch(() => ({} as Record<string, unknown>));
 
   const name = typeof body.name === 'string' ? body.name.trim() : '';
@@ -158,8 +166,12 @@ devRoutes.post('/apps', requireApprovedDeveloper, requireCsrf, async (c) => {
   const privilegeDescription =
     typeof body.privilegeDescription === 'string' ? body.privilegeDescription.trim().slice(0, 400) : '';
   const homepageUrl = typeof body.homepageUrl === 'string' ? body.homepageUrl.trim() : '';
+  const clientType: 'confidential' | 'public' = body.clientType === 'public' ? 'public' : 'confidential';
   const redirectUris = parseValidRedirectUris(body.redirectUris);
+  const postLogoutRedirectUris =
+    body.postLogoutRedirectUris !== undefined ? parseValidRedirectUris(body.postLogoutRedirectUris, true) : [];
   const allowedScopes = parseScopes(body.allowedScopes);
+  const webhookUrl = typeof body.webhookUrl === 'string' ? body.webhookUrl.trim() : '';
 
   if (name.length < 2 || name.length > 64) {
     return c.json({ ok: false, error: { code: 'INVALID_NAME', message: 'App name must be 2 to 64 characters.' } }, 400);
@@ -179,18 +191,46 @@ devRoutes.post('/apps', requireApprovedDeveloper, requireCsrf, async (c) => {
       400
     );
   }
+  if (!postLogoutRedirectUris) {
+    return c.json(
+      {
+        ok: false,
+        error: {
+          code: 'INVALID_LOGOUT_URIS',
+          message: 'Provide up to 10 valid post-logout redirect URIs without URL fragments.',
+        },
+      },
+      400
+    );
+  }
+  if (webhookUrl && !isSafeWebhookUrl(webhookUrl)) {
+    return c.json(
+      {
+        ok: false,
+        error: {
+          code: 'INVALID_WEBHOOK_URL',
+          message: 'Webhook URL must be a valid public https:// URL.',
+        },
+      },
+      400
+    );
+  }
 
   const id = crypto.randomUUID();
   const clientId = `ja_${randomHex(10)}`;
-  const clientSecret = `jas_${randomBase64Url(32)}`;
-  const clientSecretHash = await hashSecretValue(clientSecret, getPepper(c.env));
-  const clientSecretPrefix = clientSecret.slice(0, 12);
+  const clientSecret = clientType === 'confidential' ? `jas_${randomBase64Url(32)}` : null;
+  const clientSecretHash = clientSecret ? await hashSecretValue(clientSecret, getPepper(c.env)) : '';
+  const clientSecretPrefix = clientSecret ? clientSecret.slice(0, 12) : 'public';
+  const webhookSecret = webhookUrl ? `whsec_${randomBase64Url(24)}` : null;
+  const webhookSecretEnc = webhookSecret
+    ? await encryptSecretValue(webhookSecret, c.env.WEBHOOK_ENC_KEY || c.env.PASSWORD_PEPPER || 'joe-auth-webhook-fallback')
+    : null;
   const now = nowSec();
 
   // Approved immediately once user has approved developer access
   await c.env.DB.prepare(
-    `INSERT INTO apps (id, owner_user_id, name, description, privilege_description, homepage_url, client_id, client_secret_hash, client_secret_prefix, redirect_uris, allowed_scopes, is_first_party, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'approved', ?, ?)`
+    `INSERT INTO apps (id, owner_user_id, name, description, privilege_description, homepage_url, client_id, client_secret_hash, client_secret_prefix, client_type, redirect_uris, post_logout_redirect_uris, allowed_scopes, webhook_url, webhook_secret_enc, is_first_party, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'approved', ?, ?)`
   )
     .bind(
       id,
@@ -202,8 +242,12 @@ devRoutes.post('/apps', requireApprovedDeveloper, requireCsrf, async (c) => {
       clientId,
       clientSecretHash,
       clientSecretPrefix,
+      clientType,
       JSON.stringify(redirectUris),
+      JSON.stringify(postLogoutRedirectUris),
       JSON.stringify(allowedScopes),
+      webhookUrl,
+      webhookSecretEnc,
       now,
       now
     )
@@ -215,7 +259,7 @@ devRoutes.post('/apps', requireApprovedDeveloper, requireCsrf, async (c) => {
     targetType: 'app',
     targetId: id,
     ipHash: await getIpHash(c),
-    metadata: { clientId, name },
+    metadata: { clientId, name, clientType },
   });
 
   return c.json(
@@ -230,8 +274,13 @@ devRoutes.post('/apps', requireApprovedDeveloper, requireCsrf, async (c) => {
         client_id: clientId,
         client_secret: clientSecret,
         client_secret_prefix: clientSecretPrefix,
+        client_type: clientType,
         redirect_uris: redirectUris,
+        post_logout_redirect_uris: postLogoutRedirectUris,
         allowed_scopes: allowedScopes,
+        webhook_url: webhookUrl,
+        webhook_secret: webhookSecret,
+        has_webhook_secret: Boolean(webhookSecretEnc),
         has_custom_logo: false,
         logo_url: null,
         status: 'approved',
@@ -258,7 +307,9 @@ devRoutes.patch('/apps/:id', requireApprovedDeveloper, requireCsrf, async (c) =>
     privilegeDescription?: string;
     homepageUrl?: string;
     redirectUris?: string[];
+    postLogoutRedirectUris?: string[];
     allowedScopes?: string[];
+    webhookUrl?: string;
   }>().catch(() => ({} as Record<string, unknown>));
 
   const name = typeof body.name === 'string' ? body.name.trim() : existing.name;
@@ -269,16 +320,35 @@ devRoutes.patch('/apps/:id', requireApprovedDeveloper, requireCsrf, async (c) =>
       : existing.privilege_description;
   const homepageUrl = typeof body.homepageUrl === 'string' ? body.homepageUrl.trim() : existing.homepage_url;
   const redirectUris = body.redirectUris !== undefined ? parseValidRedirectUris(body.redirectUris) : JSON.parse(existing.redirect_uris);
+  const postLogoutRedirectUris =
+    body.postLogoutRedirectUris !== undefined
+      ? parseValidRedirectUris(body.postLogoutRedirectUris, true)
+      : JSON.parse(existing.post_logout_redirect_uris || '[]');
   const allowedScopes = body.allowedScopes !== undefined ? parseScopes(body.allowedScopes) : JSON.parse(existing.allowed_scopes);
+  const webhookUrl = typeof body.webhookUrl === 'string' ? body.webhookUrl.trim() : existing.webhook_url || '';
 
-  if (name.length < 2 || name.length > 64 || !isValidHttpUrl(homepageUrl) || !redirectUris) {
+  if (name.length < 2 || name.length > 64 || !isValidHttpUrl(homepageUrl) || !redirectUris || !postLogoutRedirectUris) {
     return c.json({ ok: false, error: { code: 'INVALID_INPUT', message: 'Invalid application metadata or redirect URIs.' } }, 400);
+  }
+  if (webhookUrl && !isSafeWebhookUrl(webhookUrl)) {
+    return c.json({ ok: false, error: { code: 'INVALID_WEBHOOK_URL', message: 'Webhook URL must be a valid public https:// URL.' } }, 400);
   }
 
   await c.env.DB.prepare(
-    'UPDATE apps SET name = ?, description = ?, privilege_description = ?, homepage_url = ?, redirect_uris = ?, allowed_scopes = ?, updated_at = ? WHERE id = ?'
+    'UPDATE apps SET name = ?, description = ?, privilege_description = ?, homepage_url = ?, redirect_uris = ?, post_logout_redirect_uris = ?, allowed_scopes = ?, webhook_url = ?, updated_at = ? WHERE id = ?'
   )
-    .bind(name, description, privilegeDescription, homepageUrl, JSON.stringify(redirectUris), JSON.stringify(allowedScopes), nowSec(), appId)
+    .bind(
+      name,
+      description,
+      privilegeDescription,
+      homepageUrl,
+      JSON.stringify(redirectUris),
+      JSON.stringify(postLogoutRedirectUris),
+      JSON.stringify(allowedScopes),
+      webhookUrl,
+      nowSec(),
+      appId
+    )
     .run();
 
   return c.json({ ok: true, data: { updated: true } });
@@ -383,11 +453,17 @@ devRoutes.post('/apps/:id/rotate-secret', requireApprovedDeveloper, requireCsrf,
     return c.json({ ok: false, error: { code: 'INVALID_PASSWORD', message: 'Password confirmation failed.' } }, 401);
   }
 
-  const existing = await c.env.DB.prepare('SELECT id FROM apps WHERE id = ? AND owner_user_id = ?')
+  const existing = await c.env.DB.prepare('SELECT id, client_type FROM apps WHERE id = ? AND owner_user_id = ?')
     .bind(appId, user.id)
-    .first();
+    .first<{ id: string; client_type: string }>();
   if (!existing) {
     return c.json({ ok: false, error: { code: 'NOT_FOUND', message: 'Application not found.' } }, 404);
+  }
+  if (existing.client_type === 'public') {
+    return c.json(
+      { ok: false, error: { code: 'PUBLIC_CLIENT', message: 'Public clients do not use a client secret.' } },
+      400
+    );
   }
 
   const clientSecret = `jas_${randomBase64Url(32)}`;
@@ -409,6 +485,90 @@ devRoutes.post('/apps/:id/rotate-secret', requireApprovedDeveloper, requireCsrf,
   });
 
   return c.json({ ok: true, data: { client_secret: clientSecret, client_secret_prefix: clientSecretPrefix } });
+});
+
+devRoutes.post('/apps/:id/webhook-secret', requireApprovedDeveloper, requireCsrf, async (c) => {
+  const user = c.get('auth')!.user!;
+  const appId = c.req.param('id');
+  const body = await c.req.json<{ currentPassword?: string }>().catch(() => ({} as Record<string, undefined>));
+
+  if (!(await verifyPassword(body.currentPassword || '', user.password_hash, getPepper(c.env)))) {
+    return c.json({ ok: false, error: { code: 'INVALID_PASSWORD', message: 'Password confirmation failed.' } }, 401);
+  }
+
+  const existing = await c.env.DB.prepare('SELECT id FROM apps WHERE id = ? AND owner_user_id = ?')
+    .bind(appId, user.id)
+    .first<{ id: string }>();
+  if (!existing) {
+    return c.json({ ok: false, error: { code: 'NOT_FOUND', message: 'Application not found.' } }, 404);
+  }
+
+  const webhookSecret = `whsec_${randomBase64Url(24)}`;
+  const webhookSecretEnc = await encryptSecretValue(
+    webhookSecret,
+    c.env.WEBHOOK_ENC_KEY || c.env.PASSWORD_PEPPER || 'joe-auth-webhook-fallback'
+  );
+  await c.env.DB.prepare('UPDATE apps SET webhook_secret_enc = ?, updated_at = ? WHERE id = ?')
+    .bind(webhookSecretEnc, nowSec(), appId)
+    .run();
+
+  await writeAuditLog(c.env.DB, {
+    actorId: user.id,
+    action: 'dev.app.rotate_webhook_secret',
+    targetType: 'app',
+    targetId: appId,
+    ipHash: await getIpHash(c),
+  });
+
+  return c.json({ ok: true, data: { webhook_secret: webhookSecret, has_webhook_secret: true } });
+});
+
+devRoutes.post('/apps/:id/webhook-test', requireApprovedDeveloper, requireCsrf, async (c) => {
+  const user = c.get('auth')!.user!;
+  const appId = c.req.param('id');
+  const existing = await c.env.DB.prepare(
+    'SELECT id, webhook_url, webhook_secret_enc FROM apps WHERE id = ? AND owner_user_id = ?'
+  )
+    .bind(appId, user.id)
+    .first<{ id: string; webhook_url: string; webhook_secret_enc: string | null }>();
+
+  if (!existing) {
+    return c.json({ ok: false, error: { code: 'NOT_FOUND', message: 'Application not found.' } }, 404);
+  }
+  if (!existing.webhook_url || !isSafeWebhookUrl(existing.webhook_url) || !existing.webhook_secret_enc) {
+    return c.json(
+      { ok: false, error: { code: 'WEBHOOK_NOT_CONFIGURED', message: 'Configure a valid webhook URL and signing secret first.' } },
+      400
+    );
+  }
+
+  const result = await dispatchAppWebhooks(c.env, c.executionCtx, {
+    event: 'webhook.test',
+    appId: existing.id,
+    data: { triggered_by: user.id },
+  });
+
+  return c.json({ ok: true, data: { delivered: Boolean(result.delivered), status: result.status ?? 0 } });
+});
+
+devRoutes.get('/apps/:id/logs', requireApprovedDeveloper, async (c) => {
+  const user = c.get('auth')!.user!;
+  const appId = c.req.param('id');
+  const existing = await c.env.DB.prepare('SELECT id FROM apps WHERE id = ? AND owner_user_id = ?')
+    .bind(appId, user.id)
+    .first<{ id: string }>();
+
+  if (!existing) {
+    return c.json({ ok: false, error: { code: 'NOT_FOUND', message: 'Application not found.' } }, 404);
+  }
+
+  const { results } = await c.env.DB.prepare(
+    'SELECT id, endpoint, error_code, detail, created_at FROM oauth_error_logs WHERE app_id = ? ORDER BY created_at DESC LIMIT 50'
+  )
+    .bind(appId)
+    .all();
+
+  return c.json({ ok: true, data: results || [] });
 });
 
 devRoutes.delete('/apps/:id', requireApprovedDeveloper, requireCsrf, async (c) => {
@@ -434,6 +594,8 @@ devRoutes.delete('/apps/:id', requireApprovedDeveloper, requireCsrf, async (c) =
   await c.env.DB.batch([
     c.env.DB.prepare('DELETE FROM oauth_codes WHERE app_id = ?').bind(appId),
     c.env.DB.prepare('DELETE FROM refresh_tokens WHERE app_id = ?').bind(appId),
+    c.env.DB.prepare('DELETE FROM device_codes WHERE app_id = ?').bind(appId),
+    c.env.DB.prepare('DELETE FROM oauth_error_logs WHERE app_id = ?').bind(appId),
   ]);
 
   await writeAuditLog(c.env.DB, {

@@ -61,12 +61,15 @@ app.onError((err, c) => {
 export async function runDailyCleanup(env: Bindings): Promise<void> {
   const now = nowSec();
   const auditCutoff = now - 60 * 60 * 24 * 90; // Keep 90 days of audit logs
+  const errorLogCutoff = now - 60 * 60 * 24 * 14; // Keep 14 days of app error logs
   await env.DB.batch([
     env.DB.prepare('DELETE FROM sessions WHERE expires_at <= ?').bind(now),
     env.DB.prepare('DELETE FROM oauth_codes WHERE expires_at <= ? OR used = 1').bind(now),
+    env.DB.prepare('DELETE FROM device_codes WHERE expires_at <= ?').bind(now),
     env.DB.prepare('DELETE FROM refresh_tokens WHERE expires_at <= ?').bind(now),
     env.DB.prepare('DELETE FROM verification_tokens WHERE expires_at <= ?').bind(now),
     env.DB.prepare('DELETE FROM audit_logs WHERE created_at < ?').bind(auditCutoff),
+    env.DB.prepare('DELETE FROM oauth_error_logs WHERE created_at < ?').bind(errorLogCutoff),
   ]);
 }
 

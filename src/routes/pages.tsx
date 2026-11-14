@@ -4,6 +4,7 @@ import { sanitizeReturnTo } from '../lib/session';
 import {
   AccountChooserPage,
   AdminLoginPage,
+  DevicePage,
   ForgotPasswordPage,
   LoginPage,
   RegisterPage,
@@ -12,7 +13,6 @@ import {
 import { UserPanel } from '../views/UserPanel';
 import { DevPanel } from '../views/DevPanel';
 import { AdminPanel } from '../views/AdminPanel';
-import { DocsPage } from '../views/DocsPage';
 
 const pageRoutes = new Hono<AppEnv>();
 
@@ -65,6 +65,7 @@ pageRoutes.get('/login', (c) => {
       returnTo={returnTo}
       verified={c.req.query('verified') === '1'}
       hasSavedAccounts={userAccounts.length > 0}
+      loginHint={(c.req.query('login_hint') || '').trim()}
     />
   );
 });
@@ -194,14 +195,18 @@ pageRoutes.get('/admin', (c) => {
   );
 });
 
-pageRoutes.get('/docs', (c) => {
-  const issuer = (c.env.ISSUER_URL || new URL(c.req.url).origin).replace(/\/$/, '');
+pageRoutes.get('/device', (c) => {
+  const auth = c.get('auth');
+  const userCode = (c.req.query('user_code') || '').trim();
+  const returnTo = userCode ? `/device?user_code=${encodeURIComponent(userCode)}` : '/device';
+  if (!auth?.user || auth.isSuperuser) {
+    return c.redirect(`/login?return_to=${encodeURIComponent(returnTo)}`);
+  }
   return c.html(
-    <DocsPage
-      appName={c.env.APP_NAME || 'JoeAuth'}
-      issuer={issuer}
-      auth={c.get('auth')}
+    <DevicePage
       csrfToken={c.get('csrfToken')}
+      userCode={userCode}
+      userEmail={auth.user.email}
     />
   );
 });
